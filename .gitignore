@@ -1,0 +1,81 @@
+# ── Credentials (NEVER commit) ──────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+kalshi_private_key.pem
+*.pem
+*.key
+secrets.json
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.pyc
+
+# ── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Testing ──────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE / AI tools ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.claude/
+*.sublime-project
+*.sublime-workspace
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Data / exports ───────────────────────────────────────────────────────────
+*.csv
+*.parquet
+*.feather
+data/raw/
+exports/
+
+# ── Historical data pull ─────────────────────────────────────────────────────
+checkpoint.db
+*.jsonl.gz
+kalshi_historical/
+
+# ── Autonomous arb log (committed by GitHub Actions — do NOT ignore) ─────────
+!data/live_arb_log.jsonl
+
+# ── Runtime / cache files (generated at run-time, not source) ────────────────
+dashboard/live_arbs.db
+dashboard/dashboard.db
+data/synthesis_markets_cache.json
+data/ws_predict_cache.json
+*.db
+*.db-shm
+*.db-wal
+
+.streamlit/secrets.toml
+
+# ── Scratch / local dev ─────────────────────────────────────────────────────
+scratch_*.txt
+*.bat

@@ -1,0 +1,14 @@
+# GitHub Linguist overrides
+# Force SQL files to be counted as SQL (not documentation/vendored)
+*.sql linguist-detectable=true
+*.sql linguist-language=SQL
+
+# Explicitly include SQL in stats
+database/**/*.sql linguist-detectable=true
+docs/sql/**/*.sql linguist-detectable=true
+
+# Python is primary language
+*.py linguist-language=Python
+
+# Exclude test fixtures from stats
+tests/fixtures/** linguist-generated=true
