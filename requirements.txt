@@ -1,0 +1,49 @@
+﻿# Core — 2026-09-04 01:00 (force rebuild)
+python-dotenv>=1.0
+requests>=2.31
+httpx>=0.27
+websocket-client>=1.7
+websockets>=12.0
+
+# Data
+pandas>=2.2
+numpy>=1.26
+scipy>=1.13
+
+# Database
+psycopg2-binary>=2.9
+sqlalchemy>=2.0
+alembic>=1.13
+
+# Statistics / ML
+statsmodels>=0.14
+scikit-learn>=1.4
+
+# Async
+asyncpg>=0.29
+
+# Dashboard
+streamlit>=1.35
+plotly>=5.22
+
+# Kalshi SDK (optional â€” raw HTTP also implemented)
+kalshi-python>=2.1
+
+# Testing
+pytest>=8.2
+pytest-asyncio>=0.23
+
+# Keep-alive
+playwright>=1.44
+
+# Utilities
+tenacity>=8.3
+tabulate>=0.9
+tqdm>=4.66
+pytz>=2024.1
+python-dateutil>=2.9
+
+# Crypto / auth
+cryptography>=42.0
+
+
