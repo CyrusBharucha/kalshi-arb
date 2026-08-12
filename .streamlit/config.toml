@@ -1,0 +1,15 @@
+# Last updated: 2026-09-03 — force Streamlit Cloud redeploy
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+backgroundColor = "#0D1420"
+secondaryBackgroundColor = "#131F2E"
+textColor = "#F1F5F9"
+font = "sans serif"

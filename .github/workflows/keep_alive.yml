@@ -1,0 +1,28 @@
+name: Keep Streamlit App Alive
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # every 20 minutes, 24/7
+  workflow_dispatch:          # manual trigger from GitHub UI
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install playwright
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Wake Streamlit app
+        env:
+          KALSHI_APP_URL: "https://kalshi-arb-tva5pkwy8zavn4qjcwrg9c.streamlit.app/"
+        run: python scripts/keep_alive.py

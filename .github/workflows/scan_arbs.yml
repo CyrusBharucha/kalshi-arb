@@ -1,0 +1,56 @@
+name: Scan & Record Arbs
+
+# Runs every 20 minutes, 24/7.  Connects to Synthesis WebSocket, scans for
+# arbitrage opportunities for 7 minutes, and commits any found arbs to
+# data/live_arb_log.jsonl.  Streamlit reads this file on every page load.
+# No third-party database required.
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # every 20 minutes
+  workflow_dispatch:          # manual run from GitHub Actions UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12        # hard cap — well above the 7-min scan
+
+    permissions:
+      contents: write          # needed to git-push the JSONL file
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install scanner dependencies
+        run: |
+          pip install --upgrade pip
+          pip install websocket-client requests python-dotenv
+
+      - name: Run arb scanner
+        env:
+          SYNTHESIS_SECRET_KEY: ${{ secrets.SYNTHESIS_SECRET_KEY }}
+          SCAN_DURATION: "420"     # 7 minutes
+          WARMUP_SECONDS: "60"     # 1-minute warmup
+          MIN_NET_CENTS: "10"      # only record arbs >= 10c net
+        run: python scripts/scan_and_commit.py
+
+      - name: Commit arb log if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/live_arb_log.jsonl 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No new arbs — nothing to commit."
+          else
+            git commit -m "chore: arb scan $(date -u +'%Y-%m-%dT%H:%M:%SZ') [skip ci]"
+            git push
+            echo "Pushed updated arb log."
+          fi
