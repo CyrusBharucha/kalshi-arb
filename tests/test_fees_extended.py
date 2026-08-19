@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_fees_extended.py
 ============================
 Extended tests for execution/fees.py — fee model accuracy, edge cases,

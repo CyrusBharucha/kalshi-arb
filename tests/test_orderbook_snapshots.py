@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_orderbook_snapshots.py
 ====================================
 Unit tests for data/websocket_client.py OrderBook.to_snapshot_rows()

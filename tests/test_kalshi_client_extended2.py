@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_kalshi_client_extended2.py
 =======================================
 Unit tests for data/kalshi_client.KalshiClient — methods not covered by

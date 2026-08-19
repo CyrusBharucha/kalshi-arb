@@ -76,6 +76,7 @@ class FeedStats:
     sequence_errors: int = 0
     dropped_messages: int = 0
     last_message_ts: Optional[float] = None
+    last_book_delta_ts: Optional[float] = None  # timestamp of last actual L2 book update
     latency_ms: Optional[float] = None
     start_time: float = field(default_factory=time.time)
 
@@ -92,9 +93,10 @@ class LiveState:
     def __init__(self):
         self._data_lock  = threading.RLock()
         self._markets:    Dict[str, MarketQuote] = {}
+        self._dirty:      set = set()   # tickers updated since last pop_dirty_snapshot()
         self._stats:      FeedStats = FeedStats()
         self._arb_queue:  List[Dict[str, Any]] = []  # recent live opportunities (capped)
-        self._arb_max:    int = 200
+        self._arb_max:    int = 75
         # Non-decaying session totals (not affected by queue cap)
         self._session_arbs_total:    int = 0
         self._session_arbs_ce:       int = 0
@@ -117,11 +119,13 @@ class LiveState:
     # -- Write methods (called from WebSocket thread) --------------------------
 
     # Maximum L2 depth levels to store per market (top-of-book is sufficient for arb scanning)
-    _L2_DEPTH_CAP = 5
-    # Evict markets not updated in this many seconds (likely closed/delisted)
-    _STALE_EVICT_S = 3600  # 1 hour
+    _L2_DEPTH_CAP = 3
+    # Evict markets not updated in this many seconds (likely closed/delisted).
+    # 3600s (1h) keeps ME/TH sibling legs in cache even when temporarily quiet
+    # so the dirty-set arb scanner can compare all legs of an event group.
+    _STALE_EVICT_S = 3600  # 1 hour (was 5 min — too aggressive, evicted quiet legs)
     # Hard cap on total tracked markets to bound memory on Streamlit Cloud
-    _MARKETS_CAP = 8000
+    _MARKETS_CAP = 20000  # raised from 2000 — need full ME event groups in cache
 
     def update_from_book(self, book: Any) -> None:
         """
@@ -141,7 +145,16 @@ class LiveState:
             q.yes_bid = yb.price if yb else (book.yes.best_bid or 0.0)
             q.yes_ask = ya.price if ya else (book.yes.best_ask or 1.0)
             q.no_bid  = nb.price if nb else (book.no.best_bid  or 0.0)
-            q.no_ask  = na.price if na else (book.no.best_ask  or 1.0)
+            q.no_ask  = na.price if na else (book.no.best_ask  or 0.0)
+
+            # Derive NO prices from YES complement when native NO data is absent.
+            # Synthesis feeds are YES-priced; the NO side book is often empty.
+            # no_ask = 1 - yes_bid  (cost to buy NO = 1 - what buyers pay for YES)
+            # no_bid = 1 - yes_ask  (what NO buyers receive = 1 - YES ask)
+            if q.no_ask == 0.0 and q.yes_bid > 0:
+                q.no_ask = round(1.0 - q.yes_bid, 6)
+            if q.no_bid == 0.0 and q.yes_ask < 1.0:
+                q.no_bid = round(1.0 - q.yes_ask, 6)
 
             # Cap L2 depth to avoid unbounded memory growth from deep books
             q.yes_bids = [[lvl.price, lvl.quantity] for lvl in book.yes.sorted_bids()][:self._L2_DEPTH_CAP]
@@ -153,7 +166,9 @@ class LiveState:
             q.updated_at = time.time()
 
             self._markets[ticker] = q
+            self._dirty.add(ticker)
             self._stats.markets_tracked = len(self._markets)
+            self._stats.last_book_delta_ts = time.time()
 
     def update_book(self, ticker: str, update: Dict[str, Any]) -> None:
         """Update market quote from a raw delta dict (legacy / test path)."""
@@ -181,6 +196,7 @@ class LiveState:
             q.updated_at = time.time()
 
             self._markets[ticker] = q
+            self._dirty.add(ticker)
             self._stats.markets_tracked = len(self._markets)
 
     def record_message(self, latency_ms: Optional[float] = None) -> None:
@@ -247,6 +263,19 @@ class LiveState:
                 "pre_fix":      self._session_arbs_total - self._n_clean,
             }
 
+    def pop_dirty_snapshot(self) -> Dict[str, "MarketQuote"]:
+        """
+        Return a snapshot of only the markets that received a WS update since
+        the last call, then clear the dirty set.  O(dirty) not O(all_markets).
+        Used by the arb scanner so it only evaluates markets that actually changed.
+        """
+        with self._data_lock:
+            if not self._dirty:
+                return {}
+            result = {tk: self._markets[tk] for tk in self._dirty if tk in self._markets}
+            self._dirty.clear()
+            return result
+
     def evict_stale_markets(self) -> int:
         """
         Remove markets not updated in _STALE_EVICT_S seconds.
@@ -266,6 +295,7 @@ class LiveState:
                 for tk, _ in sorted_by_age[:excess]:
                     del self._markets[tk]
                 stale.extend(tk for tk, _ in sorted_by_age[:excess])
+            self._dirty -= set(stale)   # evicted tickers can't be dirty
             self._stats.markets_tracked = len(self._markets)
             return len(stale)
 
@@ -326,10 +356,11 @@ class LiveState:
                 "reconnects":       s.reconnects,
                 "sequence_errors":  s.sequence_errors,
                 "dropped_messages": s.dropped_messages,
-                "last_message_ts":  s.last_message_ts,
-                "last_message_age_s": age,
-                "latency_ms":       s.latency_ms,
-                "uptime_s":         uptime,
+                "last_message_ts":      s.last_message_ts,
+                "last_message_age_s":   age,
+                "last_book_delta_ts":   s.last_book_delta_ts,
+                "latency_ms":           s.latency_ms,
+                "uptime_s":             uptime,
             }
 
     def get_recent_opportunities(self, limit: int = 50) -> List[Dict[str, Any]]:

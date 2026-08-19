@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_l2_performance.py
 ============================
 Performance tests for the L2 order book reconstruction engine.

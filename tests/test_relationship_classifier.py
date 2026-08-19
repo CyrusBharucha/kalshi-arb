@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_relationship_classifier.py
 Regression tests for the three known false-positive sources in
 markets/relationship_detector.py.

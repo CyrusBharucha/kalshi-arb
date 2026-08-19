@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_lifecycle_helpers.py
 ================================
 Unit tests for pure-function helpers in arbitrage/lifecycle.py:

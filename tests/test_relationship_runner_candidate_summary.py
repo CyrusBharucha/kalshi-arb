@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_relationship_runner_candidate_summary.py
 =====================================================
 Unit tests for get_candidate_summary() and _process_event() in

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_historical_scanner_db_helpers.py
 ============================================
 Unit tests for arbitrage/historical_scanner DB helper functions:

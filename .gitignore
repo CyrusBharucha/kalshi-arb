@@ -68,7 +68,7 @@ kalshi_historical/
 # ── Runtime / cache files (generated at run-time, not source) ────────────────
 dashboard/live_arbs.db
 dashboard/dashboard.db
-data/synthesis_markets_cache.json
+# data/synthesis_markets_cache.json  -- kept in git as cold-start bootstrap
 data/ws_predict_cache.json
 *.db
 *.db-shm

@@ -1,4 +1,4 @@
-﻿"""
+"""
 analysis/targeted_candle_pull.py
 Pull candlestick data ONLY for candidate markets (those in contract_relationships).
 

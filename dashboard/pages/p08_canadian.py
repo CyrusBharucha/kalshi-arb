@@ -45,32 +45,10 @@ Kalshi markets relevant to Canadian researchers and market participants
     from dashboard.live_state import get_live_state as get_live_state_p08
 
     # --- Market prefix legend -----
-    st.caption(
-        "Market prefixes — "
-        "KXBOC / KXCBDECISIONCANADA: Bank of Canada policy rate decision markets "
-        "(e.g. KXBOC-26SEP-T2.25 = will BOC set rate at 2.25% at the September 2026 meeting?); "
-        "KXCAD: CAD/USD exchange rate threshold markets "
-        "(e.g. KXCAD-0.72 = will CAD/USD close above 0.72?); "
-        "KXCORR: CORRA overnight rate markets; "
-        "KXCAHOUSEDEM: Canadian House of Commons seat count markets."
-    )
+    st.caption("KXBOC/KXCBDECISIONCANADA = BOC rate decisions · KXCAD = CAD/USD thresholds · KXCORR = CORRA rate · KXCAHOUSEDEM = House of Commons seats")
 
     # --- Data sources banner -----
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {AMBER};
-padding:0.6rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-family:JetBrains Mono,monospace;
-font-size:0.7rem;color:{TEXT2};line-height:1.7;'>
-<strong style='color:{TEXT};'>DATA SOURCES</strong><br>
-&bull; <strong>Kalshi markets</strong> — live via Synthesis WebSocket or database snapshot<br>
-&bull; <strong>Bank of Canada rate &amp; decisions</strong> — BOC Valet public API
-(<code>bankofcanada.ca/valet</code>); shown below when reachable<br>
-&bull; <strong>Statistics Canada (CPI, GDP, labour)</strong> — not yet integrated;
-BOC Valet covers rate decisions only<br>
-&bull; BOC Valet and Kalshi both require internet access; the dashboard falls back
-to database snapshot values when either is unavailable
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption("Sources: Kalshi via Synthesis WebSocket · BOC Valet API (bankofcanada.ca/valet) · falls back to DB snapshot when offline")
 
     # --- BOC next decision countdown — use authoritative list from boc_panel -----
     import datetime as _dt_boc
@@ -82,40 +60,46 @@ to database snapshot values when either is unavailable
         _days_to_boc = (_next_boc - _today_boc).days
         st.metric("NEXT BOC DECISION", f"in {_days_to_boc} days",
                   help=f"Next scheduled meeting: {_next_boc.strftime('%Y-%m-%d')}")
-        st.caption("Bank of Canada rate decisions occur approximately every 6 weeks")
+        st.caption("BOC meetings ~6-week cadence · next: Oct 28, 2026")
 
     # --- Historical BOC Rate Chart -----
-    st.markdown("### 📈 Historical BOC Rate")
+    st.markdown(
+        f"<div style='font-size:0.6rem;letter-spacing:0.12em;text-transform:uppercase;"
+        f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
+        f"HISTORICAL BOC RATE</div>",
+        unsafe_allow_html=True,
+    )
     import pandas as _pd_boc_hist
     boc_history = _pd_boc_hist.DataFrame({
         "date": ["2023-07-12","2023-09-06","2023-10-25","2024-01-24","2024-03-06",
                  "2024-04-10","2024-06-05","2024-07-24","2024-09-04","2024-10-23",
                  "2024-12-11","2025-01-29","2025-03-12","2025-04-16","2025-06-04",
                  "2025-07-30","2025-09-17","2026-01-28","2026-03-11","2026-04-16",
-                 "2026-06-04","2026-07-30"],
+                 "2026-06-04","2026-07-30","2026-09-09"],
         "rate": [5.00, 5.00, 5.00, 5.00, 5.00, 5.00, 4.75, 4.50, 4.25, 3.75,
                  3.25, 3.00, 2.75, 2.75, 2.75, 2.50, 2.50, 2.25, 2.25, 2.25,
-                 2.25, 2.25],
+                 2.25, 2.25, 2.25],
     })
     boc_history["date"] = _pd_boc_hist.to_datetime(boc_history["date"])
     st.line_chart(boc_history.set_index("date"))
-    st.caption("Source: Bank of Canada — hardcoded through 2026-07-30; next decision Sep 9, 2026")
+    st.caption("Source: Bank of Canada — hardcoded through 2026-09-09; next decision Oct 28, 2026")
 
     # --- Recent BOC rate decisions (hardcoded reference table) -----
     _boc_history = pd.DataFrame([
-        {"Date": "2026-07-30", "Decision": "Hold",    "Rate After": "2.25%"},
-        {"Date": "2026-06-04", "Decision": "Hold",    "Rate After": "2.25%"},
-        {"Date": "2026-04-16", "Decision": "Hold",    "Rate After": "2.25%"},
-        {"Date": "2026-03-11", "Decision": "Hold",    "Rate After": "2.25%"},
-        {"Date": "2026-01-28", "Decision": "-25bps",  "Rate After": "2.25%"},
-        {"Date": "2025-09-17", "Decision": "Hold",    "Rate After": "2.50%"},
-        {"Date": "2025-07-30", "Decision": "-25bps",  "Rate After": "2.50%"},
-        {"Date": "2025-06-04", "Decision": "Hold",    "Rate After": "2.75%"},
-        {"Date": "2025-03-12", "Decision": "-25bps",  "Rate After": "2.75%"},
-        {"Date": "2025-01-29", "Decision": "-25bps",  "Rate After": "3.00%"},
+        {"DATE": "2026-09-09", "DECISION": "HOLD",    "RATE AFTER": "2.25%"},
+        {"DATE": "2026-07-30", "DECISION": "HOLD",    "RATE AFTER": "2.25%"},
+        {"DATE": "2026-06-04", "DECISION": "HOLD",    "RATE AFTER": "2.25%"},
+        {"DATE": "2026-04-16", "DECISION": "HOLD",    "RATE AFTER": "2.25%"},
+        {"DATE": "2026-03-11", "DECISION": "HOLD",    "RATE AFTER": "2.25%"},
+        {"DATE": "2026-01-28", "DECISION": "-25bps",  "RATE AFTER": "2.25%"},
+        {"DATE": "2025-09-17", "DECISION": "HOLD",    "RATE AFTER": "2.50%"},
+        {"DATE": "2025-07-30", "DECISION": "-25bps",  "RATE AFTER": "2.50%"},
+        {"DATE": "2025-06-04", "DECISION": "HOLD",    "RATE AFTER": "2.75%"},
+        {"DATE": "2025-03-12", "DECISION": "-25bps",  "RATE AFTER": "2.75%"},
+        {"DATE": "2025-01-29", "DECISION": "-25bps",  "RATE AFTER": "3.00%"},
     ])
     st.dataframe(_boc_history, use_container_width=False, hide_index=True)
-    st.caption("Recent BOC decisions through 2026-07-30 — next decision 2026-09-09 (reference only)")
+    st.caption("Recent BOC decisions through 2026-09-09 — next decision 2026-10-28 (reference only)")
 
     # --- Live BOC data + next policy meeting countdown -----
     render_boc_panel(show_countdown=True)
@@ -129,14 +113,13 @@ to database snapshot values when either is unavailable
         unsafe_allow_html=True,
     )
     _econ_calendar = pd.DataFrame([
-        {"Date": "2026-09-09", "Release": "BOC Rate Decision",          "Detail": "market implied: hold at 2.25%"},
-        {"Date": "2026-09-11", "Release": "Canada CPI (Aug)",           "Detail": "expected 2.1% YoY"},
-        {"Date": "2026-09-19", "Release": "Canada Retail Sales (Jul)",  "Detail": ""},
-        {"Date": "2026-10-01", "Release": "Canada GDP (Q2 Final)",      "Detail": ""},
-        {"Date": "2026-10-17", "Release": "Canada CPI (Sep)",           "Detail": ""},
-        {"Date": "2026-10-28", "Release": "BOC Rate Decision",          "Detail": ""},
-        {"Date": "2026-10-30", "Release": "Canada GDP (Aug)",           "Detail": ""},
-        {"Date": "2026-12-09", "Release": "BOC Rate Decision",          "Detail": ""},
+        {"DATE": "2026-09-19", "RELEASE": "Canada Retail Sales (Jul)",  "DETAIL": ""},
+        {"DATE": "2026-10-01", "RELEASE": "Canada GDP (Q2 Final)",      "DETAIL": ""},
+        {"DATE": "2026-10-17", "RELEASE": "Canada CPI (Sep)",           "DETAIL": ""},
+        {"DATE": "2026-10-28", "RELEASE": "BOC Rate Decision",          "DETAIL": "market implied: hold at 2.25%"},
+        {"DATE": "2026-10-30", "RELEASE": "Canada GDP (Aug)",           "DETAIL": ""},
+        {"DATE": "2026-12-09", "RELEASE": "BOC Rate Decision",          "DETAIL": ""},
+        {"DATE": "2027-01-28", "RELEASE": "BOC Rate Decision",          "DETAIL": ""},
     ])
 
     # Find the nearest upcoming event date (for bold/colored row highlight)
@@ -153,18 +136,18 @@ to database snapshot values when either is unavailable
             pass
 
     def _highlight_cal(row):
-        if row["Release"] == "BOC Rate Decision":
+        if row["RELEASE"] == "BOC Rate Decision":
             return ["background-color: #78350f; color: #fde68a;"] * len(row)
-        if _next_event_date and row["Date"] == _next_event_date:
+        if _next_event_date and row["DATE"] == _next_event_date:
             return ["background-color: #1e3a5f; color: #93c5fd; font-weight: bold;"] * len(row)
         return [""] * len(row)
 
     _styled_cal = _econ_calendar.style.apply(_highlight_cal, axis=1)
     st.dataframe(_styled_cal, use_container_width=False, hide_index=True)
     if _next_event_date:
-        st.caption(f"Scheduled releases that may move KXBOC and KXCAD markets · Next: {_next_event_date} (highlighted)")
+        st.caption(f"SCHEDULED RELEASES THAT MAY MOVE KXBOC AND KXCAD MARKETS · NEXT: {_next_event_date} (HIGHLIGHTED)")
     else:
-        st.caption("Scheduled releases that may move KXBOC and KXCAD markets")
+        st.caption("SCHEDULED RELEASES THAT MAY MOVE KXBOC AND KXCAD MARKETS")
 
     # --- Load data -----
     df, err = get_canadian_markets()
@@ -206,7 +189,37 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
               help="*From candlestick data — main markets table has no Canadian rows in snapshot")
 
     n_arb = len(arb_df) if not arb_df.empty else 0
-    k2.metric("ACTIVE CANADIAN ARB", f"{n_arb:,}")
+    if n_arb == 0:
+        # Neon fallback: count Canadian arbs in live_arbs_cloud
+        try:
+            import dashboard.live_arb_store as _las_p08k2
+            from sqlalchemy import text as _p08k2_text
+            _p08k2_eng = getattr(_las_p08k2, "_pg_engine", None) or _las_p08k2.get_pg_engine_cached()
+            if _p08k2_eng is not None:
+                with _p08k2_eng.connect() as _p08k2_c:
+                    _p08k2_r = _p08k2_c.execute(_p08k2_text(
+                        "SELECT COUNT(*) FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXCAD%' "
+                        "   OR ticker LIKE 'KXCBDECISION%' OR ticker LIKE 'KXCORR%' "
+                        "   OR ticker LIKE 'KXCAHOUSEDEM%') "
+                        "AND net_edge_cents > 0"
+                    )).fetchone()
+                _p08k2_n = int(_p08k2_r[0]) if _p08k2_r else 0
+                if _p08k2_n > 0:
+                    k2.metric("NEON CANADIAN ARB", f"{_p08k2_n:,}",
+                              help="CANADIAN ARBS LOGGED IN NEON CLOUD STORE")
+                else:
+                    k2.metric("ACTIVE CANADIAN ARB", "0",
+                              help="Scanner detections for Canadian markets")
+            else:
+                k2.metric("ACTIVE CANADIAN ARB", f"{n_arb:,}",
+                          help="Scanner detections for Canadian markets")
+        except Exception:
+            k2.metric("ACTIVE CANADIAN ARB", f"{n_arb:,}",
+                      help="Scanner detections for Canadian markets")
+    else:
+        k2.metric("ACTIVE CANADIAN ARB", f"{n_arb:,}",
+                  help="Scanner detections for Canadian markets")
 
     if _is_sqlite:
         _vol_label = f"{_can_cs_vol:,}" if _can_cs_vol > 0 else "--"
@@ -218,9 +231,33 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
     # Best opportunity
     if not arb_df.empty and "net_edge_cents" in arb_df.columns:
         best = arb_df["net_edge_cents"].max()
-        k4.metric("BEST ARB EDGE", f"+{float(best):.2f}c" if pd.notna(best) else "--")
+        k4.metric("BEST ARB EDGE", f"+{float(best):.2f}¢" if pd.notna(best) else "--",
+                  help="Best net edge among live Canadian scanner detections")
     else:
-        k4.metric("BEST ARB EDGE", "--")
+        # Neon fallback: best edge for Canadian arbs
+        try:
+            import dashboard.live_arb_store as _las_p08k4
+            from sqlalchemy import text as _p08k4_text
+            _p08k4_eng = getattr(_las_p08k4, "_pg_engine", None) or _las_p08k4.get_pg_engine_cached()
+            if _p08k4_eng is not None:
+                with _p08k4_eng.connect() as _p08k4_c:
+                    _p08k4_r = _p08k4_c.execute(_p08k4_text(
+                        "SELECT MAX(net_edge_cents) FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXCAD%' "
+                        "   OR ticker LIKE 'KXCBDECISION%' OR ticker LIKE 'KXCORR%') "
+                        "AND strategy_type IN ('mutually_exclusive','threshold_order') "
+                        "AND net_edge_cents > 0"
+                    )).fetchone()
+                _p08k4_best = float(_p08k4_r[0]) if _p08k4_r and _p08k4_r[0] else None
+                if _p08k4_best:
+                    k4.metric("BEST NEON EDGE", f"+{_p08k4_best:.2f}¢",
+                              help="BEST NET EDGE FOR CANADIAN ARBS IN NEON CLOUD STORE")
+                else:
+                    k4.metric("BEST ARB EDGE", "--")
+            else:
+                k4.metric("BEST ARB EDGE", "--")
+        except Exception:
+            k4.metric("BEST ARB EDGE", "--")
 
     # Liquid markets (has both bid & ask) — use live WS data when available
     _ws_state_k5 = get_live_state_p08()
@@ -248,12 +285,7 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
     _ws_state = get_live_state_p08()
     _ws_connected_p08 = _ws_state.get_stats().get("connected", False)
     if not _ws_connected_p08:
-        st.markdown(
-            f"<div style='font-size:0.7rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
-            f"margin-bottom:0.5rem;'>Live Canadian quotes will appear here when the Synthesis "
-            f"WebSocket is connected (add <code>SYNTHESIS_SECRET_KEY</code> to Streamlit secrets).</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption("Live Canadian quotes require Synthesis WebSocket · add SYNTHESIS_SECRET_KEY to Streamlit secrets")
     if _ws_connected_p08:
         _all_quotes_p08 = _ws_state.snapshot_all()
         _CAN_PREFIXES_LIVE = ("KXCBDECISIONCANADA", "KXBOC", "KXCAD", "KXCORR", "KXCAHOUSEDEM")
@@ -281,10 +313,10 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
                 _age_s = _q.age_seconds if (_q.age_seconds is not None) else 0
                 _live_rows.append({
                     "TICKER":       _t,
-                    "BID":          f"{_yes_bid*100:.0f}c" if _yes_bid is not None else "--",
-                    "ASK":          f"{_yes_ask*100:.0f}c" if _yes_ask is not None else "--",
-                    "MID":          f"{(_q.mid or 0)*100:.1f}c" if (_q.mid or 0) > 0 else "--",
-                    "SPREAD":       f"{(_q.spread or 0)*100:.0f}c",
+                    "BID":          f"{_yes_bid*100:.0f}¢" if _yes_bid is not None else "--",
+                    "ASK":          f"{_yes_ask*100:.0f}¢" if _yes_ask is not None else "--",
+                    "MID":          f"{(_q.mid or 0)*100:.1f}¢" if (_q.mid or 0) > 0 else "--",
+                    "SPREAD":       f"{(_q.spread or 0)*100:.0f}¢",
                     "COMPL SPREAD": f"{_compl:.4f}" if _compl is not None else "--",
                     "AGE":          (
                         f"{int(_age_s//3600)}h{int((_age_s%3600)//60)}m"
@@ -314,30 +346,11 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
                 height=min(300, 36 + 35 * len(_live_rows)),
                 hide_index=True,
             )
-            st.caption(
-                "Column guide — "
-                "BID/ASK: YES contract best bid and ask (cents). "
-                "MID: midpoint of bid and ask. "
-                "SPREAD: bid-ask spread width (cents). "
-                "COMPL SPREAD: combined cost of owning YES + NO on the same contract "
-                "(YES ask + (1 − YES bid)); should be ≥ 1.00 — values below 1.00 indicate a "
-                "crossed/inverted market (potential riskless two-leg arb). "
-                "AGE: time since last quote update from the WebSocket feed."
-            )
+            st.caption("Columns: BID/ASK = YES best bid/ask (¢) · MID = midpoint · SPREAD = bid-ask width · COMPL SPREAD = YES ask + (1−YES bid) · should be ≥100¢ (below = feed artifact) · AGE = time since last WS quote")
         st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
 
     # --- Classifier note -----
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};
-padding:0.75rem 1rem;border-radius:3px;margin-bottom:1rem;'>
-<div style='font-size:0.72rem;color:{TEXT2};font-family:JetBrains Mono,monospace;line-height:1.6;'>
-Kalshi currently has limited Canadian-specific market coverage.<br>
-The classifier continuously monitors the full venue for newly listed
-Canadian-relevant contracts.
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption("Canadian-relevant markets · classifier monitors full Kalshi venue")
 
     # --- Historical arb section -----
     st.markdown(
@@ -389,7 +402,7 @@ Canadian-relevant contracts.
             _fomc_countdown_str = "today"
         st.metric("NEXT FOMC DECISION", _fomc_countdown_str,
                   help=f"Next FOMC meeting: {_next_fomc.strftime('%Y-%m-%d')} (~2pm ET)")
-        st.caption("Federal Reserve rate decisions — FOMC meets approximately every 6 weeks")
+        st.caption("FOMC rate decisions · ~6-week cadence")
 
     # --- Pull KXFED from LiveState snapshot + DB -----
     _fed_tickers_p08 = pd.DataFrame()
@@ -420,12 +433,32 @@ Canadian-relevant contracts.
         _fed_tickers_p08 = df[df["ticker"].str.upper().str.startswith("KXFED")].copy()
 
     if _fed_tickers_p08.empty:
-        st.info("No KXFED markets in current snapshot")
+        try:
+            from dashboard.ws_bridge import get_feed_diagnostics as _gfd_p08fed
+            _diag_fed = _gfd_p08fed()
+            _age_h_fed = _diag_fed.get("cache_age_h")
+            _sub_fed = _diag_fed.get("subscribed_tickers", 0)
+            import datetime as _dt_fed_diag
+            _today_fed = _dt_fed_diag.date.today()
+            _fomc_sep = _dt_fed_diag.date(2026, 9, 17)
+            _fomc_nov = _dt_fed_diag.date(2026, 11, 5)
+            _near_fomc_sep = _today_fed <= _fomc_sep + _dt_fed_diag.timedelta(days=3)
+            _near_fomc_nov = abs((_today_fed - _fomc_nov).days) <= 3
+            if _near_fomc_sep and _today_fed <= _fomc_sep:
+                st.caption(f"No KXFED markets in snapshot · KXFEDDECISION-26SEP near settlement ({_fomc_sep}) — books closing · next: KXFEDDECISION-26NOV")
+            elif _near_fomc_nov:
+                st.caption(f"No KXFED markets in snapshot · KXFEDDECISION-26NOV near settlement ({_fomc_nov}) — books closing · next: KXFEDDECISION-26DEC")
+            elif _age_h_fed and _age_h_fed > 12:
+                st.caption(f"No KXFED markets in snapshot · Synthesis cache {_age_h_fed:.0f}h stale ({_sub_fed:,} tickers subscribed)")
+            else:
+                st.caption(f"No KXFED markets in current snapshot ({_sub_fed:,} tickers subscribed)")
+        except Exception:
+            st.caption("No KXFED markets in current snapshot")
     else:
         # Implied Fed funds probability distribution
-        _fed_outcomes = {"Hold": 0.0, "+25 bps": 0.0, "+50 bps": 0.0, "-25 bps": 0.0}
+        _fed_outcomes = {"HOLD": 0.0, "+25 bps": 0.0, "+50 bps": 0.0, "-25 bps": 0.0}
         _fed_outcome_kws = {
-            "Hold":    ["hold", "unchanged", "no change"],
+            "HOLD":    ["hold", "unchanged", "no change"],
             "+25 bps": ["+25", "25bp", "hike", "increase"],
             "+50 bps": ["+50", "50bp"],
             "-25 bps": ["-25", "25bp cut", "cut", "decrease", "lower"],
@@ -465,7 +498,7 @@ Canadian-relevant contracts.
                 ))
             _fig_fed.update_layout(
                 **plotly_dark_layout(
-                    title={"text": "FED RATE DECISION — IMPLIED PROBABILITIES (from market prices)",
+                    title={"text": "FED RATE DECISION — IMPLIED PROBABILITIES (FROM MARKET PRICES)",
                            "font": {"size": 9, "color": TEXT3}},
                     barmode="group", height=220, showlegend=False,
                     margin={"t": 35, "b": 10, "l": 80, "r": 60},
@@ -475,7 +508,7 @@ Canadian-relevant contracts.
             )
             st.plotly_chart(_fig_fed, use_container_width=True)
         else:
-            st.info("No KXFED markets with valid prices found to build distribution.")
+            st.caption("NO KXFED MARKETS WITH VALID PRICES")
 
         _show_cols_fed = [c for c in ["ticker", "title", "last_price", "yes_bid", "yes_ask"] if c in _fed_tickers_p08.columns]
         if _show_cols_fed:
@@ -532,9 +565,9 @@ Canadian-relevant contracts.
             ),
         )
         if _divergence > 5:
-            st.info(f"Fed more dovish than BOC ({_fed_implied_cut_prob:.0f}% vs {_boc_implied_cut_prob:.0f}%) — rate differential may narrow")
+            st.caption(f"Fed more dovish than BOC ({_fed_implied_cut_prob:.0f}% vs {_boc_implied_cut_prob:.0f}%)")
         elif _divergence < -5:
-            st.info(f"BOC more dovish than Fed ({_boc_implied_cut_prob:.0f}% vs {_fed_implied_cut_prob:.0f}%) — CAD may weaken vs USD")
+            st.caption(f"BOC more dovish than Fed ({_boc_implied_cut_prob:.0f}% vs {_fed_implied_cut_prob:.0f}%)")
         else:
             st.caption(f"Fed and BOC broadly aligned (Fed cut: {_fed_implied_cut_prob:.0f}%, BOC cut: {_boc_implied_cut_prob:.0f}%)")
 
@@ -550,11 +583,11 @@ Canadian-relevant contracts.
     for _fd in _FOMC_2026:
         _fd_days = (_fd - _today_fomc).days
         _fd_status = "PAST" if _fd_days < 0 else ("TODAY" if _fd_days == 0 else f"in {_fd_days}d")
-        _fomc_cal_rows.append({"Date": _fd.strftime("%Y-%m-%d"), "Days": _fd_status})
+        _fomc_cal_rows.append({"DATE": _fd.strftime("%Y-%m-%d"), "DAYS": _fd_status})
     _fomc_cal_df = pd.DataFrame(_fomc_cal_rows)
     st.dataframe(_fomc_cal_df, use_container_width=False, hide_index=True)
 
-    st.caption("Fed decisions affect CAD/USD and indirectly influence BOC policy")
+    st.caption("FED DECISIONS INDIRECTLY INFLUENCE BOC POLICY AND CAD/USD")
     st.markdown("<hr style='margin:0.5rem 0 0.75rem 0;'>", unsafe_allow_html=True)
 
     # --- Category sections -----
@@ -606,7 +639,7 @@ Canadian-relevant contracts.
             **plotly_dark_layout(
             title={"text": "TOP 20 CANADIAN MARKETS BY VOLUME", "font": {"size": 10, "color": TEXT3}},
             height=450,
-            xaxis_title="Volume", yaxis_title="",
+            xaxis_title="VOLUME", yaxis_title="",
             yaxis={"autorange": "reversed", "tickfont": {"size": 9}},
         ))
         st.plotly_chart(fig, use_container_width=True)
@@ -671,12 +704,7 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                 and df["ticker"].str.upper().str.startswith("KXBOC").any()
             ) if not df.empty else False
             if not _has_kxboc:
-                st.info(
-                    "No KXBOC rate markets found in current snapshot. "
-                    "BOC rate probability markets (KXBOC-*) are listed by Kalshi approximately "
-                    "4–6 weeks before each Bank of Canada policy meeting. Check back closer to "
-                    "the next scheduled decision date."
-                )
+                st.caption("NO KXBOC RATE MARKETS IN CURRENT SNAPSHOT")
             else:
                 _boc_outcomes = {
                     "HOLD": 0.0, "CUT25": 0.0, "CUT50": 0.0, "HIKE": 0.0,
@@ -694,10 +722,10 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                     "HIKE":  "#EF4444",   # red
                 }
                 _outcome_labels = {
-                    "HOLD":  "Hold",
-                    "CUT25": "Cut 25bps",
-                    "CUT50": "Cut 50bps",
-                    "HIKE":  "Hike",
+                    "HOLD":  "HOLD",
+                    "CUT25": "CUT 25BPS",
+                    "CUT50": "CUT 50BPS",
+                    "HIKE":  "HIKE",
                 }
                 _boc_found = False
                 for _, _row in df.iterrows():
@@ -720,7 +748,7 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                     st.metric(
                         "MARKET CONSENSUS",
                         f"{_consensus_label} ({_consensus_pct:.0f}%)",
-                        help="Outcome with the highest implied probability from KXBOC market prices",
+                        help="OUTCOME WITH THE HIGHEST IMPLIED PROBABILITY FROM KXBOC MARKET PRICES",
                     )
                     # Progress bar: distance from 50% consensus threshold
                     _pb_color = GREEN if _consensus_pct >= 70 else (AMBER if _consensus_pct >= 55 else RED)
@@ -757,7 +785,7 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                         ))
                     _fig_boc.update_layout(
                         **plotly_dark_layout(
-                            title={"text": "BOC RATE DECISION — IMPLIED PROBABILITIES (from market prices)",
+                            title={"text": "BOC RATE DECISION — IMPLIED PROBABILITIES (FROM MARKET PRICES)",
                                    "font": {"size": 9, "color": TEXT3}},
                             barmode="group",
                             height=220,
@@ -769,7 +797,7 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                     )
                     st.plotly_chart(_fig_boc, use_container_width=True)
                 else:
-                    st.info("No KXBOC rate markets with valid prices found to build probability chart.")
+                    st.caption("NO KXBOC MARKETS WITH VALID PRICES")
 
         # --- CAD/USD FX implied rate -----
         if name == "Canadian Economy":
@@ -805,22 +833,22 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                     mode="lines+markers",
                     line={"shape": "hv", "color": BLUE, "width": 2},
                     marker={"size": 6, "color": CYAN},
-                    name="YES bid (%)",
+                    name="YES BID (%)",
                     hovertemplate="Strike: %{x:.4f}<br>Implied prob: %{y:.1f}%<extra></extra>",
                 ))
                 _fig_cad.update_layout(**plotly_dark_layout(
                     title={"text": "KXCAD — IMPLIED CAD/USD PROBABILITY DISTRIBUTION",
                            "font": {"size": 9, "color": TEXT3}},
                     height=220,
-                    xaxis_title="Implied CAD/USD Strike",
-                    yaxis_title="YES Bid (implied prob %)",
+                    xaxis_title="IMPLIED CAD/USD STRIKE",
+                    yaxis_title="YES BID (IMPLIED PROB %)",
                     margin={"l": 50, "r": 20, "t": 35, "b": 40},
                     yaxis={"range": [0, 105]},
                 ))
                 st.plotly_chart(_fig_cad, use_container_width=True)
-                st.caption("Implied CAD/USD probability distribution from Kalshi prediction markets")
+                st.caption("IMPLIED CAD/USD PROBABILITY DISTRIBUTION FROM KALSHI PREDICTION MARKETS")
             else:
-                st.info("No KXCAD markets currently tracked — check back when BOC decision approaches")
+                st.caption("NO KXCAD MARKETS TRACKED")
 
             _cad_rows = df[df["ticker"].str.upper().str.startswith("KXCAD")] if "ticker" in df.columns else pd.DataFrame()
             if not _cad_rows.empty:
@@ -844,11 +872,11 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                         import datetime as _dt_fx
                         _ts_fx = _dt_fx.datetime.utcnow().strftime("%H:%M:%S UTC")
                         st.metric(
-                            label="IMPLIED CAD/USD (from market prices)",
+                            label="IMPLIED CAD/USD (FROM MARKET PRICES)",
                             value=f"1 USD = {1/_cadusd:.4f} CAD" if _cadusd > 0 else "--",
                             help=f"Weighted midpoint from {len(_fx_rows)} KXCAD threshold market(s). Updated {_ts_fx}.",
                         )
-                        st.caption("Source: Kalshi FX markets (implied from YES prices)")
+                        st.caption("SOURCE: KALSHI FX MARKETS (IMPLIED FROM YES PRICES)")
                         # CAD/USD implied vs spot comparison
                         from dashboard.data_layer import get_latest_external_prices as _get_ext_p08
                         _ext_p08 = _get_ext_p08() or {}
@@ -857,23 +885,15 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                             _diff_pct_p08 = (_cadusd - _spot_cadusd_p08) / _spot_cadusd_p08 * 100
                             _cmp1, _cmp2, _cmp3 = st.columns(3)
                             _cmp1.metric("SPOT CAD/USD (yfinance)", f"{_spot_cadusd_p08:.4f}")
-                            _cmp2.metric("IMPLIED CAD/USD (Kalshi)", f"{_cadusd:.4f}")
+                            _cmp2.metric("IMPLIED CAD/USD (KALSHI)", f"{_cadusd:.4f}")
                             _cmp3.metric(
                                 "IMPLIED vs SPOT",
                                 f"{_diff_pct_p08:+.2f}%",
                                 help="Positive = Kalshi implies CAD stronger than yfinance spot",
                             )
-                            st.caption(
-                                "Implied vs spot divergence: positive means prediction markets imply "
-                                "a stronger CAD than the current spot rate; negative means weaker."
-                            )
+                            st.caption("Implied vs spot: positive = markets imply stronger CAD than spot · negative = weaker CAD")
                         else:
-                            st.info(
-                                "Spot CAD/USD not available from external data feed. "
-                                "Connect the yfinance pipeline (run the external market data ingestion script) "
-                                "to enable the implied vs spot comparison. "
-                                "The implied rate above is derived from Kalshi prediction markets only."
-                            )
+                            st.caption("Spot CAD/USD unavailable — implied rate from Kalshi only")
 
                         # ---- PARITY PROBABILITY ----
                         st.markdown("<br>", unsafe_allow_html=True)
@@ -889,33 +909,27 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
                                 _parity_prob = _pp
                                 break
                         if _parity_prob is not None:
-                            st.metric("PARITY PROBABILITY (CAD=USD)", f"{_parity_prob*100:.1f}c")
+                            st.metric("PARITY PROBABILITY (CAD=USD)", f"{_parity_prob*100:.1f}¢")
                         else:
-                            st.metric("PARITY PROBABILITY (CAD=USD)", "No parity market in snapshot")
-                        st.caption("CAD/USD parity = 1 USD buys exactly 1 CAD. Last occurred in 2012.")
+                            st.metric("PARITY PROBABILITY (CAD=USD)", "NO PARITY MARKET IN SNAPSHOT")
+                        st.caption("CAD/USD parity last occurred in 2012")
                         # ---- END PARITY PROBABILITY ----
 
-                        with st.expander("📐 How this is calculated", expanded=False):
-                            st.markdown(
-                                "- Each **KXCAD-X.XX** market resolves YES if CAD/USD closes above X.XX\n"
-                                "- The **YES price** = the market's implied probability of being above that threshold\n"
-                                "- We compute the **probability-weighted midpoint** of all threshold strikes as the implied spot rate\n"
-                                "- This is an **approximation** — actual market rates may differ"
-                            )
+                        st.caption("KXCAD-X.XX YES price = P(CAD/USD > X.XX) · probability-weighted midpoint of strikes = implied spot rate · approximation only")
 
         display = df.copy()
 
         if "yes_bid" in display.columns:
             display["BID"] = display["yes_bid"].apply(
-                lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
             )
         if "yes_ask" in display.columns:
             display["ASK"] = display["yes_ask"].apply(
-                lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
             )
         if "last_price" in display.columns:
             display["LAST"] = display["last_price"].apply(
-                lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
             )
         if "volume" in display.columns:
             display["VOLUME"] = display["volume"].apply(
@@ -941,57 +955,124 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
 def _render_historical_arb(hist_stats: dict):
     """Historical arb summary for Canadian markets."""
     if hist_stats.get("error") or hist_stats.get("total_opps", 0) == 0:
-        _health = get_system_health()
-        _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
-        if hist_stats.get("error"):
-            st.info("Historical arb scan data not yet available. Connect the data pipeline to populate Canadian market history.")
-        elif _is_sqlite:
-            st.markdown(
-                f"<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};"
-                f"padding:0.6rem 1rem;border-radius:3px;font-family:JetBrains Mono,monospace;"
-                f"font-size:0.72rem;color:{TEXT3};'>"
-                f"No Canadian arb opportunities in database. "
-                f"The current dataset covers general market strategies. "
-                f"Live Canadian arb scanning activates when the Synthesis WebSocket is connected.</div>",
-                unsafe_allow_html=True,
-            )
+        # Neon fallback: query live_arbs_cloud for Canadian ticker prefixes
+        _p08_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+        _p08_neon_rows = []
+        if _p08_neon_ok or True:  # always try Neon
+            try:
+                import dashboard.live_arb_store as _las_p08h
+                from sqlalchemy import text as _p08h_text
+                _p08h_eng = (
+                    getattr(_las_p08h, "_pg_engine", None)
+                    or _las_p08h.get_pg_engine_cached()
+                )
+                if _p08h_eng is not None:
+                    _CAN_LIKE = (
+                        "ticker LIKE 'KXBOC%' OR ticker LIKE 'KXCAD%' OR "
+                        "ticker LIKE 'KXCORR%' OR ticker LIKE 'KXCAHOUSEDEM%' OR "
+                        "ticker LIKE 'KXCBDECISIONCANADA%'"
+                    )
+                    with _p08h_eng.connect() as _p08h_c:
+                        _p08h_row = _p08h_c.execute(_p08h_text(
+                            f"SELECT COUNT(*), AVG(net_edge_cents), MAX(net_edge_cents), "
+                            f"string_agg(DISTINCT strategy_type, ', ') "
+                            f"FROM live_arbs_cloud WHERE ({_CAN_LIKE}) "
+                            f"AND strategy_type NOT IN ('yes_no_complement')"
+                        )).fetchone()
+                    if _p08h_row and _p08h_row[0]:
+                        _p08_neon_rows = [_p08h_row]
+            except Exception:
+                pass
+        if _p08_neon_rows:
+            _p08h_cnt = int(_p08_neon_rows[0][0])
+            _p08h_avg = float(_p08_neon_rows[0][1] or 0)
+            _p08h_max = float(_p08_neon_rows[0][2] or 0)
+            _p08h_strats = str(_p08_neon_rows[0][3] or "")
+            _STRAT_SHORT_P08H = {
+                "mutually_exclusive": "ME", "threshold_order": "TH",
+                "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS",
+            }
+            _p08h_strats_short = " / ".join(
+                _STRAT_SHORT_P08H.get(s.strip(), s.strip().upper()[:4])
+                for s in str(_p08h_strats).split(",") if s.strip()
+            ) if _p08h_strats else "--"
+            nh1, nh2, nh3, nh4 = st.columns(4)
+            nh1.metric("NEON ARBS (CA)", f"{_p08h_cnt:,}")
+            nh2.metric("AVG EDGE", f"{_p08h_avg:.2f}¢")
+            nh3.metric("BEST EDGE", f"{_p08h_max:.2f}¢")
+            nh4.metric("STRATEGIES", _p08h_strats_short[:20] if _p08h_strats_short else "--")
+            st.caption("Canadian arb records from Neon cloud (KXBOC, KXCAD, KXCORR, KXCAHOUSEDEM)")
+            # Recent Canadian arbs table
+            try:
+                if _p08h_eng is not None:
+                    with _p08h_eng.connect() as _p08h_c2:
+                        import time as _p08h_time
+                        _now_p08h = _p08h_time.time()
+                        _p08h_recent = _p08h_c2.execute(_p08h_text(
+                            f"SELECT ticker, strategy_type, net_edge_cents, "
+                            f"yes_ask, no_ask, detected_at "
+                            f"FROM live_arbs_cloud WHERE ({_CAN_LIKE}) "
+                            f"AND strategy_type NOT IN ('yes_no_complement') "
+                            f"ORDER BY detected_at DESC LIMIT 10"
+                        )).fetchall()
+                    if _p08h_recent:
+                        import pandas as _pd_p08h
+                        def _p08h_age(ts):
+                            try:
+                                _s = _now_p08h - _pd_p08h.to_datetime(ts, utc=True).timestamp()
+                                if _s < 3600: return f"{int(_s//60)}m ago"
+                                if _s < 86400: return f"{int(_s//3600)}h ago"
+                                return f"{int(_s//86400)}d ago"
+                            except Exception:
+                                return str(ts)[:10] if ts else "--"
+                        _p08h_rdf = _pd_p08h.DataFrame(
+                            _p08h_recent, columns=["TICKER", "STRATEGY", "NET EDGE (¢)", "YES ASK", "NO ASK", "AGE"]
+                        )
+                        _p08h_rdf["STRATEGY"] = _p08h_rdf["STRATEGY"].apply(
+                            lambda s: _STRAT_SHORT_P08H.get(str(s), str(s).upper()[:4])
+                        )
+                        _p08h_rdf["NET EDGE (¢)"] = _p08h_rdf["NET EDGE (¢)"].apply(
+                            lambda v: f"{float(v):.2f}" if v else "--"
+                        )
+                        _p08h_rdf["YES ASK"] = _p08h_rdf["YES ASK"].apply(
+                            lambda v: f"{float(v):.3f}" if v else "--"
+                        )
+                        _p08h_rdf["NO ASK"] = _p08h_rdf["NO ASK"].apply(
+                            lambda v: f"{float(v):.3f}" if v else "--"
+                        )
+                        _p08h_rdf["AGE"] = _p08h_rdf["AGE"].apply(_p08h_age)
+                        st.markdown(
+                            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                            f"color:#64748b;margin:0.5rem 0 0.3rem;'>RECENT CANADIAN ARBS (NEON)</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.dataframe(_p08h_rdf, use_container_width=True, hide_index=True)
+            except Exception:
+                pass
         else:
-            # Live mode, no opps yet
-            st.markdown(
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT3};"
-                f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-                f"No historical Canadian arb opportunities recorded yet.<br>"
-                f"<span style='font-size:0.65rem;'>Run the l2_scan_canadian scanner to detect opportunities.</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+            _health = get_system_health()
+            _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
+            if hist_stats.get("error"):
+                st.caption("NO CANADIAN ARB HISTORY AVAILABLE")
+            elif _is_sqlite:
+                st.caption("NO CANADIAN ARB OPPORTUNITIES IN NEON CLOUD")
+            else:
+                st.caption("NO HISTORICAL CANADIAN ARB OPPORTUNITIES RECORDED YET")
         return
 
     h1, h2, h3, h4 = st.columns(4)
     h1.metric("TOTAL OPPS", f"{int(hist_stats.get('total_opps', 0)):,}")
     h2.metric("CLASS A (EXECUTABLE)", f"{int(hist_stats.get('executable_opps', 0)):,}")
-    h3.metric("MEDIAN EDGE", f"{float(hist_stats.get('median_edge_cents', 0)):.2f}c")
+    h3.metric("MEDIAN EDGE", f"{float(hist_stats.get('median_edge_cents', 0)):.2f}¢")
     med_lt = hist_stats.get("median_lifetime_s", 0) or 0
     _lt_label = f"{int(med_lt)}s" if med_lt < 3600 else f"{int(med_lt//3600)}h{int((med_lt%3600)//60)}m"
     h4.metric("MEDIAN LIFETIME", _lt_label)
     if med_lt == 0:
-        st.caption("Median lifetime = 0s — scanner detected these opportunities at price update time; actual window may be sub-second.")
+        st.caption("Median lifetime = 0s — detected at price update time · actual window may be sub-second")
 
 
 def _empty_state():
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:2rem;
-border-radius:3px;text-align:center;'>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.85rem;color:{TEXT3};'>
-NO CANADIAN MARKETS FOUND
-</div>
-<div style='font-size:0.72rem;color:{TEXT3};margin-top:0.5rem;'>
-The classifier found no Canadian-relevant markets in the database.<br>
-Ensure markets have been loaded and the events table is populated.
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption("No Canadian markets found — ensure markets are loaded and events table is populated")
 
 
 def _render_canadian_from_candlesticks():
@@ -1025,7 +1106,7 @@ ORDER BY total_vol DESC
         )
         st.markdown(
             f"<div style='font-size:0.7rem;color:{TEXT2};margin-bottom:0.5rem;'>"
-            f"{len(_ca_rows)} Canadian-relevant market(s) found in historical candlestick data.</div>",
+            f"{len(_ca_rows)} Canadian-relevant market(s) in historical candlestick data</div>",
             unsafe_allow_html=True,
         )
         _ca_df = pd.DataFrame(_ca_rows, columns=["TICKER", "VOLUME", "CANDLES", "EARLIEST", "LATEST"])
@@ -1038,11 +1119,55 @@ ORDER BY total_vol DESC
 
 
 def _unavailable():
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;
-border-radius:3px;color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;'>
-Database unavailable. Connect a PostgreSQL or SQLite database to load Canadian market data.
+    # Try to show Neon Canadian arb stats before showing generic unavailable
+    try:
+        from dashboard.data_layer import get_canadian_historical_arb_stats
+        _ca_stats = get_canadian_historical_arb_stats()
+        _ca_total = _ca_stats.get("total_opps", 0) or _ca_stats.get("total_opportunities", 0)
+        if _ca_stats and _ca_total > 0:
+            from dashboard.styles import GREEN, TEXT2
+            st.markdown(
+                f"""<div style='background:{PANEL};border:1px solid {GREEN};border-left:3px solid {GREEN};
+padding:0.75rem 1rem;border-radius:3px;font-size:0.72rem;font-family:JetBrains Mono,monospace;
+color:{TEXT2};line-height:1.7;'>
+<span style='color:{GREEN};'>● NEON CLOUD</span> — Canadian market arbs logged<br>
+Total: <b>{_ca_total}</b> &nbsp;·&nbsp;
+Best edge: <b>{_ca_stats.get('max_edge_cents', 0):.2f}¢</b> &nbsp;·&nbsp;
+Avg edge: <b>{_ca_stats.get('median_edge_cents', 0):.2f}¢</b><br>
+<span style='font-size:0.62rem;'>Live market feed needed for real-time orderbook data</span>
 </div>""",
-        unsafe_allow_html=True,
-    )
+                unsafe_allow_html=True,
+            )
+            return
+    except Exception:
+        pass
+    # Check Neon availability even if no Canadian arbs logged
+    _p08_neon_ok = False
+    _p08_neon_total = 0
+    try:
+        import dashboard.live_arb_store as _las_p08
+        _p08_neon_ok = (
+            bool(getattr(_las_p08, "_pg_ok", False))
+            or (getattr(_las_p08, "_pg_engine", None) is not None)
+        )
+        if _p08_neon_ok:
+            from sqlalchemy import text as _p08_text
+            _p08_eng = getattr(_las_p08, "_pg_engine", None) or _las_p08.get_pg_engine_cached()
+            if _p08_eng is not None:
+                with _p08_eng.connect() as _p08_c:
+                    _p08_r = _p08_c.execute(_p08_text(
+                        "SELECT COUNT(*) FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement')"
+                    )).fetchone()
+                _p08_neon_total = int(_p08_r[0]) if _p08_r else 0
+    except Exception:
+        pass
+    if not _p08_neon_ok:
+        _p08_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+    if _p08_neon_ok:
+        from dashboard.styles import AMBER as _A_P08, TEXT2 as _T2_P08
+        _neon_note = f" — {_p08_neon_total:,} total arbs in Neon" if _p08_neon_total > 0 else ""
+        st.caption(f"Neon connected{_neon_note} — no Canadian arbs detected yet · logs when BOC/CAD conditions met")
+    else:
+        st.caption("Market data unavailable — live feed or PostgreSQL required for Canadian orderbook")
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_external_data_fetch_guards.py
 ==========================================
 Unit tests for data/external_market_data.py guarded fetch functions:
@@ -108,7 +108,15 @@ class TestFetchAllBocSeries:
 
     def test_calls_fetch_for_each_series(self):
         from feeds.external_market_data import fetch_all_boc_series, BOC_SERIES
-        with patch("feeds.external_market_data.fetch_boc_series", return_value=0) as mock_fetch:
+        mock_scope = MagicMock()
+        mock_scope.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        mock_scope.return_value.__exit__ = MagicMock(return_value=False)
+        with (
+            patch("feeds.external_market_data.fetch_boc_series", return_value=0) as mock_fetch,
+            patch("feeds.external_market_data.session_scope", mock_scope),
+            patch("feeds.external_market_data.log_ingestion"),
+            patch("time.sleep"),
+        ):
             fetch_all_boc_series()
         assert mock_fetch.call_count == len(BOC_SERIES)
 

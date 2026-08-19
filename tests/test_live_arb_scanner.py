@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_arb_scanner.py
 ================================
 Unit tests for data/synthesis_live.py LiveArbScanner private methods:

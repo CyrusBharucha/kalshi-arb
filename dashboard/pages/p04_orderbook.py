@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/pages/p04_orderbook.py — Order Book L2
 
 Sections:
@@ -38,13 +38,75 @@ ORDER BOOK
     from dashboard.live_state import get_live_state as _gls
     _ws = _gls().get_stats()
     _ws_on = _ws.get("connected", False)
-    _ws_dot = GREEN if _ws_on else "#6B7280"
-    _ws_txt = f"{_ws.get('markets_tracked', 0):,} markets · {_ws.get('messages_per_sec', 0):.0f} msg/s" if _ws_on else "feed offline — add SYNTHESIS_SECRET_KEY to enable"
+    import os as _os_p04
+    _sk_p04 = _os_p04.environ.get("SYNTHESIS_SECRET_KEY", "").strip()
+    if not _sk_p04:
+        try:
+            _sk_p04 = (st.secrets.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+        except Exception:
+            pass
+    if not _sk_p04:
+        try:
+            for _ns_p04 in st.secrets.values():
+                if hasattr(_ns_p04, "get"):
+                    _sk_p04 = (_ns_p04.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+                    if _sk_p04:
+                        break
+        except Exception:
+            pass
+    _has_key_p04 = bool(_sk_p04)
+    # Check Neon state for feed label
+    _p04_neon_ok = False
+    try:
+        import dashboard.live_arb_store as _las_p04_feed
+        _p04_neon_ok = (
+            bool(getattr(_las_p04_feed, "_pg_ok", False))
+            or (getattr(_las_p04_feed, "_pg_engine", None) is not None)
+        )
+        if not _p04_neon_ok:
+            _p04_neon_ok = _las_p04_feed.get_pg_engine_cached() is not None
+    except Exception:
+        pass
+    if not _p04_neon_ok:
+        _p04_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+    _ws_dot = GREEN if _ws_on else (GREEN if _p04_neon_ok else (AMBER if _has_key_p04 else "#6B7280"))
+    if _ws_on:
+        _ws_txt = f"{_ws.get('markets_tracked', 0):,} markets · {_ws.get('messages_per_sec', 0):.0f} msg/s"
+    elif _p04_neon_ok:
+        _ws_txt = "CLOUD — historical arb data from Neon · L2 quotes available once WebSocket connects"
+    elif _has_key_p04:
+        _ws_txt = "↻ CONNECTING — L2 data available once WebSocket connects"
+    else:
+        _ws_txt = "feed offline — add SYNTHESIS_SECRET_KEY to Streamlit secrets"
     st.markdown(
         f"<div style='font-size:0.62rem;color:{TEXT3};font-family:JetBrains Mono,monospace;margin-bottom:0.5rem;'>"
         f"<span style='color:{_ws_dot};'>●</span> {_ws_txt}</div>",
         unsafe_allow_html=True,
     )
+    # When feed is offline, suggest tickers from Neon arb history
+    if not _ws_on:
+        try:
+            import dashboard.live_arb_store as _las_p04
+            from sqlalchemy import text as _p04_text
+            _p04_eng = getattr(_las_p04, "_pg_engine", None) or _las_p04.get_pg_engine_cached()
+            if _p04_eng is not None:
+                with _p04_eng.connect() as _p04_c:
+                    _p04_rows = _p04_c.execute(_p04_text(
+                        "SELECT ticker, MAX(detected_at) AS last_seen, "
+                        "MAX(net_edge_cents) AS best_edge "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type IN ('mutually_exclusive','threshold_order') "
+                        "GROUP BY ticker ORDER BY last_seen DESC LIMIT 10"
+                    )).fetchall()
+                if _p04_rows:
+                    _neon_ticker_opts = [r[0] for r in _p04_rows]
+                    st.caption(
+                        "RECENT ARB TICKERS: "
+                        + ", ".join(f"`{t}`" for t in _neon_ticker_opts[:5])
+                        + (f" + {len(_neon_ticker_opts)-5} MORE" if len(_neon_ticker_opts) > 5 else "")
+                    )
+        except Exception:
+            pass
 
     # --- Market selector -----
     col_sel, col_src = st.columns([4, 1])
@@ -52,7 +114,7 @@ ORDER BOOK
         ticker = st.text_input(
             "TICKER",
             placeholder="e.g. KXMLBALEAST-26-TB",
-            help="Enter any Kalshi market ticker",
+            help="ENTER ANY KALSHI MARKET TICKER",
         )
     with col_src:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -71,12 +133,12 @@ ORDER BOOK
     except Exception:
         pass
     compare_ticker = st.selectbox(
-        "Compare with market (optional)",
-        ["None"] + _all_tickers,
+        "COMPARE WITH MARKET (OPTIONAL)",
+        ["NONE"] + _all_tickers,
         key="compare_ticker",
     )
     normalize = st.checkbox(
-        "NORMALIZE (show prices as % of their max — easier cross-market depth comparison)",
+        "NORMALIZE (% OF MAX)",
         value=False,
         key="p04_normalize",
     )
@@ -93,14 +155,14 @@ ORDER BOOK
             _k2.metric("MSG/SEC", f"{_ws2.get('messages_per_sec', 0):.1f}")
             _k3.metric("TOTAL MESSAGES", f"{_ws2.get('messages_total', 0):,}")
             _sess_p04 = state.get_session_stats()
-            _k4.metric("SESSION ARBS", f"{_sess_p04['total']:,}", help="Total arbs detected this session by background scanner")
+            _k4.metric("SESSION ARBS", f"{_sess_p04['total']:,}", help="CE/ME/TH executable arb detections this session")
             st.markdown(f"<div style='font-size:0.65rem;color:{TEXT3};letter-spacing:0.06em;text-transform:uppercase;margin:0.5rem 0 0.3rem;'>TOP 20 MARKETS — tightest spreads</div>", unsafe_allow_html=True)
             live_data = [{
                 "TICKER": b.ticker,
-                "BID": f"{b.yes_bid*100:.0f}c",
-                "ASK": f"{b.yes_ask*100:.0f}c",
-                "SPREAD": f"{b.spread*100:.0f}c",
-                "MID": f"{b.mid*100:.0f}c",
+                "BID": f"{b.yes_bid*100:.0f}¢",
+                "ASK": f"{b.yes_ask*100:.0f}¢",
+                "SPREAD": f"{b.spread*100:.0f}¢",
+                "MID": f"{b.mid*100:.0f}¢",
                 "L2": "Y" if b.l2_available else "--",
                 "AGE": (
                     f"{int(b.age_seconds//3600)}h{int((b.age_seconds%3600)//60)}m"
@@ -114,9 +176,69 @@ ORDER BOOK
         else:
             st.markdown(
                 f"<div style='font-size:0.72rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
-                f"padding:0.5rem 0;'>Enter a ticker above to view its L2 depth chart.</div>",
+                f"padding:0.5rem 0;'>Enter a ticker above to view its L2 depth chart</div>",
                 unsafe_allow_html=True,
             )
+            # Neon fallback: show best arb tickers as typing suggestions
+            try:
+                import dashboard.live_arb_store as _las_p04_blank
+                from sqlalchemy import text as _p04b_text
+                _p04b_eng = (
+                    getattr(_las_p04_blank, "_pg_engine", None)
+                    or _las_p04_blank.get_pg_engine_cached()
+                )
+                if _p04b_eng is not None:
+                    with _p04b_eng.connect() as _p04b_c:
+                        import time as _p04b_time
+                    _now_p04b = _p04b_time.time()
+                    _p04b_rows = _p04b_c.execute(_p04b_text(
+                            "SELECT ticker, strategy_type, net_edge_cents, "
+                            "yes_ask, no_ask, detected_at "
+                            "FROM live_arbs_cloud "
+                            "WHERE strategy_type IN ('mutually_exclusive','threshold_order') "
+                            "AND net_edge_cents > 0 "
+                            "ORDER BY detected_at DESC LIMIT 12"
+                        )).fetchall()
+                    if _p04b_rows:
+                        _STRAT_P04B = {"mutually_exclusive": "ME", "threshold_order": "TH"}
+                        st.markdown(
+                            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                            f"color:{TEXT3};margin:0.75rem 0 0.3rem;'>"
+                            f"<span style='color:{GREEN};'>●</span> NEON CLOUD — RECENT ARBS (enter a ticker above)</div>",
+                            unsafe_allow_html=True,
+                        )
+                        import pandas as _pd_p04b
+                        def _p04b_age(ts):
+                            try:
+                                import pandas as _pdts4
+                                _s = _now_p04b - _pdts4.to_datetime(ts, utc=True).timestamp()
+                                if _s < 3600: return f"{int(_s//60)}m ago"
+                                if _s < 86400: return f"{int(_s//3600)}h ago"
+                                return f"{int(_s//86400)}d ago"
+                            except Exception:
+                                return str(ts)[:10] if ts else "--"
+                        _p04b_df = _pd_p04b.DataFrame(
+                            _p04b_rows,
+                            columns=["TICKER", "STRATEGY", "NET EDGE (¢)", "YES ASK", "NO ASK", "AGE"]
+                        )
+                        _p04b_df["STRATEGY"] = _p04b_df["STRATEGY"].apply(
+                            lambda s: _STRAT_P04B.get(str(s), str(s)[:4].upper())
+                        )
+                        _p04b_df["NET EDGE (¢)"] = _p04b_df["NET EDGE (¢)"].apply(
+                            lambda v: f"{float(v):.2f}" if v else "--"
+                        )
+                        _p04b_df["YES ASK"] = _p04b_df["YES ASK"].apply(
+                            lambda v: f"{float(v):.3f}" if v else "--"
+                        )
+                        _p04b_df["NO ASK"] = _p04b_df["NO ASK"].apply(
+                            lambda v: f"{float(v):.3f}" if v else "--"
+                        )
+                        _p04b_df["AGE"] = _p04b_df["AGE"].apply(_p04b_age)
+                        st.dataframe(_p04b_df, use_container_width=True, hide_index=True,
+                                     height=min(380, len(_p04b_rows) * 35 + 40))
+                        st.caption("COPY A TICKER ABOVE TO EXPLORE L2 DEPTH")
+            except Exception:
+                pass
         return
 
     # --- Fetch book -----
@@ -124,21 +246,12 @@ ORDER BOOK
 
     if err or not book:
         # No live book — still try to show historical candlestick data
-        _err_msg = "not in WebSocket feed" if not err else (
-            "feed not connected" if any(kw in str(err).lower() for kw in ("connect", "refused", "timeout", "timed"))
-            else "book unavailable"
+        _err_msg = "NOT IN WEBSOCKET FEED" if not err else (
+            "FEED NOT CONNECTED" if any(kw in str(err).lower() for kw in ("connect", "refused", "timeout", "timed"))
+            else "BOOK UNAVAILABLE"
         )
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {AMBER};border-left:4px solid {AMBER};
-padding:0.6rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-size:0.72rem;
-color:{TEXT2};font-family:JetBrains Mono,monospace;'>
-NO LIVE BOOK for {ticker} &mdash; {_err_msg}.<br>
-Showing historical candlestick data where available.
-</div>""",
-            unsafe_allow_html=True,
-        )
-        st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
-        st.markdown("#### HISTORICAL PRICE CONTEXT (candlestick data)")
+        st.caption(f"NO LIVE BOOK FOR {ticker} — {_err_msg} · SHOWING HISTORICAL CANDLESTICK DATA")
+        st.markdown("#### HISTORICAL PRICE CONTEXT (CANDLESTICK DATA)")
         _interval_no_book = st.radio(
             "INTERVAL", [15, 60, 1440],
             format_func=lambda v: {15: "15m", 60: "1h", 1440: "1d"}[v],
@@ -157,21 +270,21 @@ Showing historical candlestick data where available.
                 fig_nb.add_trace(_go2.Bar(x=_ts2, y=_vol2, name="VOLUME",
                     marker_color=BLUE, opacity=0.25, yaxis="y2"))
             fig_nb.update_layout(**plotly_dark_layout(
-                title={"text": f"{ticker} — candlestick history", "font": {"size": 10, "color": TEXT3}},
-                height=300, xaxis_title="", yaxis_title="YES Price",
+                title={"text": f"{ticker} — CANDLESTICK HISTORY", "font": {"size": 10, "color": TEXT3}},
+                height=300, xaxis_title="", yaxis_title="YES PRICE",
                 yaxis=dict(range=[0, 1], tickformat=".2f"),
-                yaxis2=dict(title="Vol", overlaying="y", side="right", showgrid=False),
+                yaxis2=dict(title="VOL", overlaying="y", side="right", showgrid=False),
                 legend=dict(orientation="h", y=1.12),
                 margin={"l": 50, "r": 60, "t": 40, "b": 20},
             ))
             st.plotly_chart(fig_nb, use_container_width=True)
             st.caption(
-                f"{len(_hist_df2):,} candles · "
+                f"{len(_hist_df2):,} CANDLES · "
                 f"{_ts2.min().strftime('%Y-%m-%d') if pd.notna(_ts2.min()) else '?'} – "
                 f"{_ts2.max().strftime('%Y-%m-%d') if pd.notna(_ts2.max()) else '?'}"
             )
         else:
-            st.info(f"No candlestick data for {ticker} at this interval. Try 1h or 1d.")
+            st.caption(f"NO CANDLESTICK DATA FOR {ticker} AT THIS INTERVAL")
         return
 
     l2_available = book.get("l2_available", False)
@@ -204,18 +317,7 @@ color:{"#22C55E" if "synthesis" in source else AMBER};'>
     )
 
     if not l2_available:
-        st.markdown(
-            f"""<div style='background:{PANEL2};border:1px dashed {AMBER};
-padding:0.5rem 1rem;border-radius:3px;margin-bottom:0.75rem;'>
-<span style='font-family:JetBrains Mono,monospace;font-size:0.7rem;
-color:{AMBER};letter-spacing:0.06em;'>
-L2 DEPTH: PENDING &mdash; displaying top-of-book only.
-Full L2 reconstruction will be available once the Synthesis feed
-upgrade is complete.
-</span>
-</div>""",
-            unsafe_allow_html=True,
-        )
+        st.caption("L2 depth pending — top-of-book only")
 
     # -------------------------------------------------------------- Top-of-book KPIs --------------------------------------------------------------
     yes_bid = float(book.get("yes_bid") or 0)
@@ -224,10 +326,10 @@ upgrade is complete.
     mid     = (yes_bid + yes_ask) / 2 if (yes_bid + yes_ask) > 0 else 0.0
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("YES BID",  f"{yes_bid*100:.0f}c")
-    k2.metric("YES ASK",  f"{yes_ask*100:.0f}c")
-    k3.metric("MID",      f"{mid*100:.1f}c")
-    k4.metric("SPREAD",   f"{spread*100:.0f}c")
+    k1.metric("YES BID",  f"{yes_bid*100:.0f}¢")
+    k2.metric("YES ASK",  f"{yes_ask*100:.0f}¢")
+    k3.metric("MID",      f"{mid*100:.1f}¢")
+    k4.metric("SPREAD",   f"{spread*100:.0f}¢")
 
     # NO side: use actual market values from book when available, else theoretical.
     # Use explicit None-check — 0.0 is a valid (falsy) price and must not fall through.
@@ -235,7 +337,7 @@ upgrade is complete.
     _raw_no_ask = book.get("no_ask")
     no_bid = float(_raw_no_bid) if _raw_no_bid is not None else (1.0 - yes_ask)
     no_ask = float(_raw_no_ask) if _raw_no_ask is not None else (1.0 - yes_bid)
-    k5.metric("NO BID/ASK", f"{no_bid*100:.0f}c / {no_ask*100:.0f}c")
+    k5.metric("NO BID/ASK", f"{no_bid*100:.0f}¢ / {no_ask*100:.0f}¢")
 
     # --- NEW: Spread / Liquidity / Imbalance metrics row -----
     _s1, _s2, _s3, _s4, _s5 = st.columns(5)
@@ -286,7 +388,7 @@ upgrade is complete.
         else:
             _imb_str = "--"
         _s5.metric("BOOK IMBALANCE", _imb_str,
-                   help="(bid qty − ask qty) / total qty. Positive = bid pressure (bullish). Negative = ask pressure (bearish).")
+                   help="(bid qty − ask qty) / total qty · positive = bid pressure · negative = ask pressure")
     except Exception:
         _s5.metric("BOOK IMBALANCE", "--")
 
@@ -371,7 +473,7 @@ upgrade is complete.
                 st.metric(
                     "EST. SLIPPAGE (10 contracts)",
                     f"{_slip_impact_pct:.3f}%",
-                    help=f"Price impact of a 10-contract buy vs best ask {_slip_best_ask*100:.1f}c. VWAP: {_slip_avg*100:.2f}c",
+                    help=f"Price impact of a 10-contract buy vs best ask {_slip_best_ask*100:.1f}¢. VWAP: {_slip_avg*100:.2f}¢",
                 )
             else:
                 st.metric("EST. SLIPPAGE (10 contracts)", "N/A — insufficient depth")
@@ -381,12 +483,12 @@ upgrade is complete.
     # Complement arb indicator: if YES ask + actual NO ask < 100c, flag it
     _comp_cost = yes_ask + no_ask
     _comp_spread = _comp_cost - 1.0  # negative = arb exists
-    _comp_label = f"{_comp_spread*100:+.1f}c" if yes_ask > 0 and no_ask > 0 else "--"
+    _comp_label = f"{_comp_spread*100:+.1f}¢" if yes_ask > 0 and no_ask > 0 else "--"
     k6.metric(
         "COMPLEMENT SPREAD",
         _comp_label,
-        help="(YES ask + NO ask) − 100c. Negative = complement arb exists. Green delta = arb opportunity.",
-        delta="ARB OPPORTUNITY" if _comp_spread < 0 else None,
+        help="(YES ask + NO ask) − 100¢ · negative = stale/crossed quote",
+        delta="QUOTES BELOW PARITY" if _comp_spread < 0 else None,
         delta_color="normal" if _comp_spread < 0 else "off",
     )
     # --- Complement spread progress bar ("distance to arb") -----
@@ -395,15 +497,15 @@ upgrade is complete.
         _bar_color = "#22C55E" if _pct >= 97 else (AMBER if _pct >= 94 else TEXT3)
         _bar_width = min(100.0, max(0.0, _pct))
         if _pct < 100.0:
-            _bar_label = f"{_pct:.1f}¢ — {100.0 - _pct:.1f}¢ below parity (ARB)"
+            _bar_label = f"{_pct:.1f}¢ — {100.0 - _pct:.1f}¢ below parity"
         else:
             _bar_label = f"{_pct:.1f}¢ — {_pct - 100.0:.1f}¢ above parity"
         _toward_arb_pct = min(100.0, max(0.0, _pct))
-        _toward_arb_label = f"{_toward_arb_pct:.1f}% toward arb"
+        _toward_arb_label = f"{_toward_arb_pct:.1f}% of parity"
         st.markdown(
             f"""<div style='margin:0.4rem 0 0.5rem 0;'>
 <div style='font-size:0.58rem;color:{TEXT3};letter-spacing:0.08em;text-transform:uppercase;
-font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO ask)</div>
+font-family:Inter,sans-serif;margin-bottom:3px;'>YES ask + NO ask (distance to parity)</div>
 <div style='background:{BORDER};border-radius:2px;height:6px;width:100%;position:relative;overflow:hidden;'>
 <div style='background:{_bar_color};height:6px;width:{_bar_width:.1f}%;border-radius:2px;'></div>
 </div>
@@ -417,7 +519,7 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
         )
 
     # --- Multi-market comparison -----
-    if compare_ticker and compare_ticker != "None":
+    if compare_ticker and compare_ticker != "NONE":
         _cmp_book, _cmp_err = get_live_orderbook(compare_ticker)
         if _cmp_book and not _cmp_err:
             _cmp_yes_bid = float(_cmp_book.get("yes_bid") or 0)
@@ -448,14 +550,14 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
             def _fmt_price(v_dec: float) -> str:
                 if normalize and _norm_max > 0:
                     return f"{v_dec / _norm_max * 100:.1f}%"
-                return f"{v_dec*100:.1f}c"
+                return f"{v_dec*100:.1f}¢"
 
             # Mid price spread row
             _mid_diff = mid - _cmp_mid
             _comp_row = st.columns(3)
             _comp_row[0].metric(f"{ticker} YES MID", _fmt_price(mid))
             _comp_row[1].metric(f"{compare_ticker} YES MID", _fmt_price(_cmp_mid))
-            _comp_row[2].metric("MID SPREAD (primary − compare)", f"{_mid_diff*100:+.1f}c")
+            _comp_row[2].metric("MID SPREAD (primary − compare)", f"{_mid_diff*100:+.1f}¢")
             if normalize:
                 st.caption("NORMALIZED — prices shown as % of the higher mid across both markets")
 
@@ -473,7 +575,7 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
                 _lc3.metric("NO BID", _fmt_price(no_bid))
                 _lc4.metric("NO ASK", _fmt_price(no_ask))
                 _lc5, _lc6 = st.columns(2)
-                _lc5.metric("SPREAD", f"{spread*100:.0f}c")
+                _lc5.metric("SPREAD", f"{spread*100:.0f}¢")
                 try:
                     _lc6.metric("IMBALANCE", _imb_str)
                 except NameError:
@@ -490,7 +592,7 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
                 _rc3.metric("NO BID", _fmt_price(_cmp_no_bid))
                 _rc4.metric("NO ASK", _fmt_price(_cmp_no_ask))
                 _rc5, _rc6 = st.columns(2)
-                _rc5.metric("SPREAD", f"{_cmp_spread*100:.0f}c")
+                _rc5.metric("SPREAD", f"{_cmp_spread*100:.0f}¢")
                 _rc6.metric("IMBALANCE", _cmp_imb_str)
 
             # --- Track compare market mid history for correlation -----
@@ -531,71 +633,30 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
                     pass
             st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
         else:
-            st.warning(f"Could not load orderbook for comparison market: {compare_ticker}")
+            st.caption(f"COULD NOT LOAD ORDERBOOK FOR {compare_ticker}")
 
     # --- Position Sizing expander -----
-    with st.expander("💰 Position Sizing", expanded=False):
+    with st.expander("POSITION SIZING", expanded=False):
         _target_profit = st.number_input(
-            "Target profit ($)", min_value=1, max_value=1000, value=10, key="p04_target_profit"
+            "TARGET PROFIT ($)", min_value=1, max_value=1000, value=10, key="p04_target_profit"
         )
         _compl_cost_cents = _comp_cost * 100  # e.g. 98.5
         _net_edge_cents = max(0.0, 100.0 - _compl_cost_cents)
         if _net_edge_cents <= 0 or yes_ask <= 0 or no_ask <= 0:
-            st.info("No arb edge — position sizing N/A")
+            st.caption("No arb edge — position sizing N/A")
         else:
             _contracts_needed = _target_profit / (_net_edge_cents / 100)
             _pos1, _pos2 = st.columns(2)
             _pos1.metric("CONTRACTS NEEDED", f"{_contracts_needed:.0f}")
             _pos2.metric("TOTAL OUTLAY", f"${_contracts_needed * _compl_cost_cents / 100:.2f}")
 
-    with st.expander("📈 What this spread means", expanded=False):
-        st.markdown(
-            "- **The complement spread = YES ask + NO ask.** For a fair market this equals exactly $1.00.\n"
-            "- **Spread < $1.00** means buying both legs costs less than $1.00 — an arbitrage opportunity exists.\n"
-            "- **Spread > $1.00** means no arb. The market maker captures the spread.\n"
-            "- Our scanner detects spreads that survive the 2¢ fee floor after Kalshi's taker fee."
-        )
+    st.caption("YES ask + NO ask: 100¢ = fair · <100¢ = crossed/stale · >100¢ = normal spread")
 
     if _comp_cost < 1.0:
         _comp_gross = (1.0 - _comp_cost) * 100
-        _fee_yes = min(3.5, math.ceil(0.07 * yes_ask * (1.0 - yes_ask) * 100))
-        _fee_no  = min(3.5, math.ceil(0.07 * no_ask  * (1.0 - no_ask)  * 100))
-        _comp_net = _comp_gross - _fee_yes - _fee_no
-        if _comp_net > 0.005:
-            st.markdown(
-                f"<div style='background:#052e16;border:1px solid #22C55E;border-left:4px solid #22C55E;"
-                f"padding:0.5rem 1rem;border-radius:3px;margin-top:0.4rem;margin-bottom:0.4rem;"
-                f"font-family:JetBrains Mono,monospace;font-size:0.72rem;'>"
-                f"<span style='color:#22C55E;font-weight:600;'>⚡ COMPLEMENT ARB</span>&nbsp;&nbsp;"
-                f"YES ask {yes_ask*100:.1f}c + NO ask {no_ask*100:.1f}c = {_comp_cost*100:.1f}c &lt; 100c &nbsp;|&nbsp; "
-                f"Gross: +{_comp_gross:.2f}c &nbsp;·&nbsp; Fees: {_fee_yes+_fee_no:.2f}c &nbsp;·&nbsp; "
-                f"<span style='color:#22C55E;'>NET: +{_comp_net:.2f}c</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            # --- EXECUTION SNAPSHOT ---
-            # Best YES ask size: first level of yes_asks (ascending)
-            _snap_yes_asks = sorted(book.get("yes_asks", []), key=lambda x: x[0]) if book.get("yes_asks") else []
-            _snap_yes_bids = sorted(book.get("yes_bids", []), key=lambda x: x[0], reverse=True) if book.get("yes_bids") else []
-            # NO ask corresponds to YES bid (NO ask price = 1 - YES bid price); size at best NO ask = best YES bid size
-            _yes_ask_avail = int(_snap_yes_asks[0][1]) if _snap_yes_asks and _snap_yes_asks[0][1] else None
-            _no_ask_avail  = int(_snap_yes_bids[0][1]) if _snap_yes_bids and _snap_yes_bids[0][1] else None
-            _yes_avail_str = f"{_yes_ask_avail:,}" if _yes_ask_avail else "?"
-            _no_avail_str  = f"{_no_ask_avail:,}"  if _no_ask_avail  else "?"
-            _exec_size = min(_yes_ask_avail or 0, _no_ask_avail or 0)
-            _exec_gross_dollar = _exec_size * (1.0 - _comp_cost) if _exec_size else 0.0
-            _exec_net_dollar   = _exec_size * (_comp_net / 100) if _exec_size else 0.0
-            st.success(
-                f"**HOW TO EXECUTE — COMPLEMENT ARB**\n\n"
-                f"1. Buy YES at **{yes_ask*100:.1f}c** ({_yes_avail_str} avail)\n\n"
-                f"2. Buy NO at **{no_ask*100:.1f}c** ({_no_avail_str} avail) — simultaneously\n\n"
-                f"Combined cost: **{_comp_cost*100:.1f}c** &lt; 100c guaranteed payout\n\n"
-                f"Target: **{_exec_size:,} contracts** (min of both sides available)\n\n"
-                f"Capital required: **${_exec_size * _comp_cost:.2f}** &nbsp;·&nbsp; "
-                f"Gross P&L: **${_exec_gross_dollar:.2f}** &nbsp;·&nbsp; "
-                f"Fees: **{_fee_yes+_fee_no:.2f}c/contract** &nbsp;·&nbsp; "
-                f"Net P&L: **${_exec_net_dollar:.2f}**"
-            )
+        st.caption(
+            f"QUOTES BELOW PARITY: {yes_ask*100:.1f}¢ + {no_ask*100:.1f}¢ = {_comp_cost*100:.1f}¢ — FEED/ROUNDING ARTIFACT · LIVE COST ALWAYS ≥ $1.00"
+        )
 
     # -------------------------------------------------------------- L2 Depth table --------------------------------------------------------------
     yes_bids: List = book.get("yes_bids", [[yes_bid, None]])
@@ -606,7 +667,7 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
         if l2_available:
             _render_depth_chart(yes_bids, yes_asks)
         else:
-            st.caption("Depth chart, liquidity metrics, and slippage calculator require full L2 data (pending Synthesis feed upgrade).")
+            st.caption("DEPTH CHART REQUIRES FULL L2 DATA")
 
     # --- Liquidity metrics -----
     if l2_available and (yes_bids or yes_asks):
@@ -642,7 +703,7 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
 
     # --- Historical price context (from candlestick DB) -----
     st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
-    with st.expander("📈 HISTORICAL PRICE CONTEXT (candlestick data)", expanded=False):
+    with st.expander("HISTORICAL PRICE CONTEXT (CANDLESTICK)", expanded=False):
         _hist_df, _hist_err = get_market_price_history(ticker, interval=60, limit=200)
         if not _hist_df.empty:
             _ts = pd.to_datetime(_hist_df["period_end_ts"], utc=True, errors="coerce")
@@ -661,32 +722,32 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
                 fill="tonexty", fillcolor="rgba(34,197,94,0.05)"))
             # Current live mid as a horizontal reference line
             fig_hist.add_hline(y=mid, line_color=BLUE, line_dash="dot", line_width=1,
-                annotation_text=f"LIVE MID {mid*100:.0f}c", annotation_position="right")
+                annotation_text=f"LIVE MID {mid*100:.0f}¢", annotation_position="right")
             if _vol.sum() > 0:
                 fig_hist.add_trace(go.Bar(x=_ts, y=_vol, name="VOLUME",
                     marker_color=BLUE, opacity=0.25, yaxis="y2"))
             fig_hist.update_layout(**plotly_dark_layout(
-                title={"text": f"{ticker} — 1h OHLC (historical)", "font": {"size": 10, "color": TEXT3}},
+                title={"text": f"{ticker} — 1H OHLC (HISTORICAL)", "font": {"size": 10, "color": TEXT3}},
                 height=300,
-                xaxis_title="", yaxis_title="YES Price",
+                xaxis_title="", yaxis_title="YES PRICE",
                 yaxis=dict(range=[0, 1], tickformat=".2f"),
-                yaxis2=dict(title="Vol", overlaying="y", side="right", showgrid=False),
+                yaxis2=dict(title="VOL", overlaying="y", side="right", showgrid=False),
                 legend=dict(orientation="h", y=1.12),
                 margin={"l": 50, "r": 60, "t": 40, "b": 20},
             ))
             st.plotly_chart(fig_hist, use_container_width=True)
             st.caption(
-                f"{len(_hist_df):,} hourly candles · "
+                f"{len(_hist_df):,} HOURLY CANDLES · "
                 f"{_ts.min().strftime('%Y-%m-%d') if pd.notna(_ts.min()) else '?'} – "
                 f"{_ts.max().strftime('%Y-%m-%d') if pd.notna(_ts.max()) else '?'}"
             )
         elif _hist_err:
-            st.caption(f"No historical data available for {ticker}.")
+            st.caption(f"NO HISTORICAL DATA AVAILABLE FOR {ticker}")
         else:
-            st.caption(f"No hourly candles found for {ticker}. Try another ticker or interval.")
+            st.caption(f"NO HOURLY CANDLES FOR {ticker} · TRY ANOTHER TICKER OR INTERVAL")
 
     # --- Recent Trade History -----
-    st.subheader("📜 Recent Trade History")
+    st.subheader("RECENT TRADE HISTORY")
     _real_trades_found = False
     try:
         from dashboard.data_layer import _sqlite_conn as _gsc_p04
@@ -725,17 +786,17 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
                         _qty = 0
                     _val = round(_p_c / 100 * _qty, 2) if _p_c is not None and _qty else None
                     _trade_records.append({
-                        "Time (ET)": _ts_et,
-                        "Side": str(_side_raw or ""),
-                        "Price (c)": f"{_p_c:.0f}c" if _p_c is not None else "--",
-                        "Size": _qty,
-                        "Value ($)": f"${_val:.2f}" if _val is not None else "--",
+                        "TIME (ET)": _ts_et,
+                        "SIDE": str(_side_raw or ""),
+                        "PRICE (¢)": f"{_p_c:.0f}¢" if _p_c is not None else "--",
+                        "SIZE": _qty,
+                        "VALUE ($)": f"${_val:.2f}" if _val is not None else "--",
                     })
                 _trade_df = pd.DataFrame(_trade_records)
                 # Buy/Sell ratio metrics
-                _buy_ct = sum(1 for r in _trade_records if "buy" in r["Side"].lower())
-                _sell_ct = sum(1 for r in _trade_records if "sell" in r["Side"].lower())
-                _avg_sz = sum(r["Size"] for r in _trade_records) / max(len(_trade_records), 1)
+                _buy_ct = sum(1 for r in _trade_records if "buy" in r["SIDE"].lower())
+                _sell_ct = sum(1 for r in _trade_records if "sell" in r["SIDE"].lower())
+                _avg_sz = sum(r["SIZE"] for r in _trade_records) / max(len(_trade_records), 1)
                 _tm1, _tm2, _tm3 = st.columns(3)
                 _tm1.metric("BUY TRADES", f"{_buy_ct}")
                 _tm2.metric("SELL TRADES", f"{_sell_ct}")
@@ -746,7 +807,7 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
 
     if not _real_trades_found:
         # Generate synthetic recent trades from orderbook (simulated fills at current bid/ask)
-        st.warning("⚠️ Simulated trades — actual trade feed not available in demo mode")
+        st.caption("SIMULATED FILLS (NO LIVE TRADE FEED)")
         import random as _rnd_p04
         import datetime as _dt_p04
         _syn_trades = []
@@ -765,16 +826,16 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
             _qty = _rng.randint(1, 50)
             _val = round(_px_c / 100 * _qty, 2)
             _syn_trades.append({
-                "Time (ET)": _t_et,
-                "Side": _side,
-                "Price (c)": f"{_px_c:.0f}c",
-                "Size": _qty,
+                "TIME (ET)": _t_et,
+                "SIDE": _side,
+                "Price (¢)": f"{_px_c:.0f}¢",
+                "SIZE": _qty,
                 "Value ($)": f"${_val:.2f}",
             })
         _syn_df = pd.DataFrame(_syn_trades)
-        _buy_ct_s = sum(1 for r in _syn_trades if "buy" in r["Side"])
+        _buy_ct_s = sum(1 for r in _syn_trades if "buy" in r["SIDE"])
         _sell_ct_s = len(_syn_trades) - _buy_ct_s
-        _avg_sz_s = sum(r["Size"] for r in _syn_trades) / max(len(_syn_trades), 1)
+        _avg_sz_s = sum(r["SIZE"] for r in _syn_trades) / max(len(_syn_trades), 1)
         _sm1, _sm2, _sm3 = st.columns(3)
         _sm1.metric("BUY TRADES (sim)", f"{_buy_ct_s}")
         _sm2.metric("SELL TRADES (sim)", f"{_sell_ct_s}")
@@ -788,7 +849,7 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
         unsafe_allow_html=True,
     )
     _pi_order_size = st.number_input(
-        "Test order size (contracts)", min_value=1, max_value=100, value=10, key="p04_order_size"
+        "TEST ORDER SIZE (CONTRACTS)", min_value=1, max_value=100, value=10, key="p04_order_size"
     )
 
     _pi_asks = sorted(book.get("yes_asks", []), key=lambda x: x[0]) if book.get("yes_asks") else []
@@ -828,7 +889,7 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
             else:
                 st.warning(f"Insufficient ask liquidity ({_pi_filled}/{_pi_order_size} filled)")
         else:
-            st.warning("No ask levels available")
+            st.warning("NO ASK LEVELS AVAILABLE")
 
     # --- Sell simulation: walk bids -----
     with _pi_col_sell:
@@ -857,7 +918,7 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
             else:
                 st.warning(f"Insufficient bid liquidity ({_ps_filled}/{_pi_order_size} filled)")
         else:
-            st.warning("No bid levels available")
+            st.warning("NO BID LEVELS AVAILABLE")
 
     # --- Round-trip cost metrics -----
     if _vwap_ask_cents is not None and _vwap_bid_cents is not None:
@@ -872,17 +933,17 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
         _rt2.metric(
             "BREAK-EVEN EDGE NEEDED",
             f"{_rt_breakeven_cents:.2f}¢/contract",
-            help="Must earn this per contract to cover round-trip slippage",
+            help="MUST EARN THIS PER CONTRACT TO COVER ROUND-TRIP SLIPPAGE",
         )
         if _rt_breakeven_cents > 4.0:
-            st.info(f"⚠️ Wide spread: need >{_rt_breakeven_cents:.1f}¢ edge to profit on this size")
+            st.caption(f"WIDE SPREAD: NEED >{_rt_breakeven_cents:.1f}¢ EDGE TO PROFIT ON THIS SIZE")
 
     _ws_live_p04 = _ws.get("connected", False)
     if auto_refresh and (not _is_sqlite or _ws_live_p04):
         import time as _t04
         _now04 = _t04.time()
         if st.session_state.get("_p04_next_refresh", 0) <= _now04:
-            st.session_state["_p04_next_refresh"] = _now04 + 2
+            st.session_state["_p04_next_refresh"] = _now04 + 5
             st.rerun()
 
 
@@ -964,13 +1025,7 @@ def _render_depth_chart(bids: list, asks: list):
     _bids_valid = [b for b in bids if len(b) > 1 and b[1]]
     _asks_valid = [a for a in asks if len(a) > 1 and a[1]]
     if not _bids_valid and not _asks_valid:
-        from dashboard.styles import PANEL, BORDER, TEXT3 as _T3
-        st.markdown(
-            f"<div style='background:{PANEL};border:1px solid {BORDER};padding:1.5rem;"
-            f"border-radius:3px;text-align:center;font-family:JetBrains Mono,monospace;"
-            f"font-size:0.75rem;color:{_T3};'>NO DEPTH DATA — market has no L2 levels available</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption("No depth data — market has no L2 levels available")
         return
 
     bids_s = sorted(bids, key=lambda x: x[0], reverse=True)   # highest bid first
@@ -1028,8 +1083,8 @@ def _render_depth_chart(bids: list, asks: list):
         _layout = plotly_dark_layout(
             title={"text": "CUMULATIVE DEPTH", "font": {"size": 10, "color": TEXT3}},
             height=220,
-            xaxis_title="Price (¢)",
-            yaxis_title="Cumulative Contracts",
+            xaxis_title="PRICE (¢)",
+            yaxis_title="CUMULATIVE CONTRACTS",
             showlegend=True,
             margin={"l": 50, "r": 20, "t": 30, "b": 35},
             xaxis={"range": [0, 100]},
@@ -1047,24 +1102,20 @@ def _render_depth_chart(bids: list, asks: list):
             x=_labels, y=_values,
             marker_color=_colors,
             marker_line_width=0,
-            name="Size at best price",
+            name="SIZE AT BEST PRICE",
         ))
         _layout = plotly_dark_layout(
-            title={"text": "TOP-OF-BOOK SIZES (no L2 ladder)", "font": {"size": 10, "color": TEXT3}},
+            title={"text": "TOP-OF-BOOK SIZES (NO L2 LADDER)", "font": {"size": 10, "color": TEXT3}},
             height=220,
             xaxis_title="",
-            yaxis_title="Contracts",
+            yaxis_title="CONTRACTS",
             showlegend=False,
             margin={"l": 50, "r": 20, "t": 30, "b": 35},
         )
 
     fig.update_layout(**_layout)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "Cumulative depth — area shows total contracts available at each price level. "
-        "Green (YES bids) cumulates right-to-left; Red (YES asks / NO bids) cumulates left-to-right. "
-        "Dotted line = current YES mid price."
-    )
+    st.caption("Cumulative depth · green = YES bids (right-to-left) · red = YES asks (left-to-right) · dotted = mid")
 
 
 def _render_liquidity_metrics(bids: list, asks: list, mid: float):
@@ -1102,13 +1153,13 @@ def _render_liquidity_metrics(bids: list, asks: list, mid: float):
     m2.metric("ASK DEPTH",      f"{int(ask_total):,}")
     imb_pct = imbalance * 100
     m3.metric("IMBALANCE",      f"{imb_pct:+.1f}%")
-    m4.metric("LIQ 1c",       f"{int(liquidity_1c):,}")
-    m5.metric("LIQ 2c",       f"{int(liquidity_2c):,}")
-    m6.metric("LIQ 5c",       f"{int(liquidity_5c):,}")
+    m4.metric("LIQ 1¢",       f"{int(liquidity_1c):,}")
+    m5.metric("LIQ 2¢",       f"{int(liquidity_2c):,}")
+    m6.metric("LIQ 5¢",       f"{int(liquidity_5c):,}")
 
     m7, m8 = st.columns(2)
-    m7.metric("VWAP BID",  f"{vwap_bid*100:.1f}c")
-    m8.metric("VWAP ASK",  f"{vwap_ask*100:.1f}c")
+    m7.metric("VWAP BID",  f"{vwap_bid*100:.1f}¢")
+    m8.metric("VWAP ASK",  f"{vwap_ask*100:.1f}¢")
 
 
 def _render_seq_panel(ticker: str):
@@ -1171,7 +1222,7 @@ def _render_slippage_calculator(bids: list, asks: list):
         side = st.radio("SIDE", ["BUY YES", "BUY NO"], horizontal=True, key="slippage_side")
         # Guard: qty must be positive (UI enforces min=1, but validate defensively)
         if qty <= 0:
-            st.warning("Quantity must be at least 1 contract.")
+            st.caption("QUANTITY MUST BE AT LEAST 1 CONTRACT")
             return
 
     with col_d:
@@ -1191,7 +1242,7 @@ def _render_slippage_calculator(bids: list, asks: list):
             take = min(int(size), qty - filled)
             total_cost += take * float(price)
             filled += take
-            rows.append({"PRICE (c)": f"{float(price)*100:.0f}", "SIZE": f"{int(size):,}", "FILLED": f"{take:,}"})
+            rows.append({"PRICE (¢)": f"{float(price)*100:.0f}", "SIZE": f"{int(size):,}", "FILLED": f"{take:,}"})
 
         if filled > 0:
             avg_price = total_cost / filled
@@ -1206,11 +1257,11 @@ display:flex;gap:2rem;flex-wrap:wrap;'>
 </div>
 <div>
 <div style='font-size:0.58rem;color:{TEXT3};letter-spacing:0.06em;'>AVG PRICE</div>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.82rem;color:{TEXT};'>{avg_price*100:.2f}c</div>
+<div style='font-family:JetBrains Mono,monospace;font-size:0.82rem;color:{TEXT};'>{avg_price*100:.2f}¢</div>
 </div>
 <div>
 <div style='font-size:0.58rem;color:{TEXT3};letter-spacing:0.06em;'>SLIPPAGE</div>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.82rem;color:{AMBER if slippage_c > 0 else GREEN};'>{slippage_c:+.2f}c</div>
+<div style='font-family:JetBrains Mono,monospace;font-size:0.82rem;color:{AMBER if slippage_c > 0 else GREEN};'>{slippage_c:+.2f}¢</div>
 </div>
 <div>
 <div style='font-size:0.58rem;color:{TEXT3};letter-spacing:0.06em;'>TOTAL COST</div>
@@ -1230,15 +1281,6 @@ display:flex;gap:2rem;flex-wrap:wrap;'>
 
 
 def _placeholder_msg(msg: str):
-    from dashboard.styles import PANEL, BORDER, TEXT3
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};
-padding:2rem;border-radius:3px;text-align:center;'>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.8rem;color:{TEXT3};
-letter-spacing:0.04em;'>
-{msg}
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption(msg)
+
 

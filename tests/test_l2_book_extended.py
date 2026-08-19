@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_l2_book_extended.py
 ================================
 Extended unit tests for data/orderbook_l2.py — methods not covered in

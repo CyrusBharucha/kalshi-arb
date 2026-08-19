@@ -15,6 +15,12 @@
 -- recent one per market. Canadian relevance is scored on the EVENT, so every
 -- market inherits the flag through its event_ticker.
 CREATE OR REPLACE VIEW vw_active_markets AS
+WITH latest_snaps AS (
+    SELECT DISTINCT ON (market_id)
+        market_id, yes_bid, yes_ask, volume, open_interest, snapshot_ts
+    FROM market_snapshots
+    ORDER BY market_id, snapshot_ts DESC
+)
 SELECT
     m.market_id,
     m.ticker,
@@ -36,14 +42,7 @@ SELECT
     e.title                                                   AS event_title
 FROM markets m
 JOIN events e ON e.event_ticker = m.event_ticker
-LEFT JOIN LATERAL (
-    SELECT ms.yes_bid, ms.yes_ask, ms.volume,
-           ms.open_interest, ms.snapshot_ts
-    FROM market_snapshots ms
-    WHERE ms.market_id = m.market_id
-    ORDER BY ms.snapshot_ts DESC
-    LIMIT 1
-) s ON TRUE
+LEFT JOIN latest_snaps s ON s.market_id = m.market_id
 WHERE m.status IN ('open','active');
 
 
@@ -116,12 +115,7 @@ SELECT
     m.category                                         AS primary_market_category,
     m.event_ticker
 FROM arbitrage_opportunities ao
-LEFT JOIN LATERAL (
-    SELECT m.title, m.category, m.event_ticker
-    FROM markets m
-    WHERE m.market_id = ANY(ao.markets_involved::TEXT[])
-    LIMIT 1
-) m ON true;
+LEFT JOIN markets m ON m.market_id = (ao.markets_involved::TEXT[])[1];
 
 
 -- ---------------------------------------------------------------------------
@@ -137,7 +131,7 @@ SELECT
     ao.markets_involved,
     COUNT(m_can.market_id)  AS canadian_market_count
 FROM arbitrage_opportunities ao
-JOIN LATERAL UNNEST(ao.markets_involved::TEXT[]) AS mid(market_id) ON true
+CROSS JOIN UNNEST(ao.markets_involved::TEXT[]) AS mid(market_id)
 JOIN markets m_can ON m_can.market_id = mid.market_id
 JOIN events e_can ON e_can.event_ticker = m_can.event_ticker
                  AND e_can.canadian_relevance >= 1

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_ws_orderbook.py
 ============================
 Unit tests for data/websocket_client.py OrderBook class.

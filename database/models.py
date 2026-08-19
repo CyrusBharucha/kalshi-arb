@@ -1,4 +1,4 @@
-﻿"""
+"""
 database/models.py
 SQLAlchemy ORM models - mirror of schema.sql.
 Use these for Python-level queries and inserts; raw SQL in repository.py for complex analytics.

@@ -322,6 +322,33 @@ class L2Cache:
         with self._lock:
             return dict(self._stats)
 
+    # Hard cap: evict books not updated in the last N seconds, and enforce a
+    # total size limit. Called from the arb-scanner eviction loop.
+    _STALE_EVICT_S = 300   # 5 minutes — mirrors LiveState
+    _BOOKS_CAP     = 2000  # mirrors LiveState._MARKETS_CAP
+
+    def evict_stale(self) -> int:
+        import time as _t
+        cutoff = _t.time() - self._STALE_EVICT_S
+        with self._lock:
+            stale = [mid for mid, book in self._books.items()
+                     if book.updated_at < cutoff]
+            for mid in stale:
+                del self._books[mid]
+            if len(self._books) > self._BOOKS_CAP:
+                sorted_books = sorted(
+                    self._books.items(), key=lambda kv: kv[1].updated_at
+                )
+                excess = len(self._books) - self._BOOKS_CAP
+                for mid, _ in sorted_books[:excess]:
+                    del self._books[mid]
+                stale.extend(mid for mid, _ in sorted_books[:excess])
+            return len(stale)
+
+    def __getitem__(self, market_id: str):
+        with self._lock:
+            return self._books[market_id]
+
     def __len__(self):
         with self._lock:
             return len(self._books)

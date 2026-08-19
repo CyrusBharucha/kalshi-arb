@@ -1,4 +1,4 @@
-﻿"""
+"""
 scripts/auto_refresh.py
 ========================
 Long-running data refresh daemon.

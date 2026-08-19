@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_parse_candle.py
 ============================
 Unit tests for analysis/targeted_candle_pull.py _parse_candle().

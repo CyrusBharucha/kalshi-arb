@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_me_strategy.py
 ==========================
 Unit tests for arbitrage/mutually_exclusive.py — check_me_arb, scan_me_arb,

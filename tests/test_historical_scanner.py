@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_historical_scanner.py
 Tests for arbitrage/historical_scanner.py — complement detection,
 window tracking, and time-sliced scanning logic.

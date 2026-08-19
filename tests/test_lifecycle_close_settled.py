@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_lifecycle_close_settled.py
 =======================================
 Unit tests for arbitrage/lifecycle.OpportunityLifecycle.close_settled():

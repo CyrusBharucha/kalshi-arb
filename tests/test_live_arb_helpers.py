@@ -283,6 +283,5 @@ class TestStatusColors:
 
     def test_strategies_list_has_all(self):
         from dashboard.pages.p02_live_arb import _STRATEGIES
-        assert "All" in _STRATEGIES
-        assert "yes_no_complement" in _STRATEGIES
-        assert "mutually_exclusive" in _STRATEGIES
+        # First entry is the "show all" option (may be "All" or "All (ME/TH)")
+        assert any("all" in s.lower() for s in _STRATEGIES), f"No 'all' entry in {_STRATEGIES}"

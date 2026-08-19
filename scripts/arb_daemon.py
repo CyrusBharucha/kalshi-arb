@@ -1,4 +1,4 @@
-﻿"""
+"""
 scripts/arb_daemon.py
 ======================
 Headless arbitrage scanner daemon — runs the full Synthesis WebSocket +

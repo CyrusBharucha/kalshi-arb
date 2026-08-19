@@ -122,7 +122,7 @@ def _action_label(strategy: str, ticker: str, title: str = "") -> str:
     n = int(m.group(1)) if m else ""
     _tn = f" — {title}" if title else ""
     if strategy == "yes_no_complement":
-        return f"Buy YES + NO on same market{_tn}"
+        return f"Feed artifact — YES+NO same market (not executable){_tn}"
     elif strategy == "collectively_exhaustive":
         return f"Buy YES on all {n} candidates{_tn}" if n else f"Buy YES on all candidates{_tn}"
     elif strategy == "mutually_exclusive":
@@ -157,35 +157,65 @@ HISTORICAL ARBITRAGE
         _sess_total = 0
 
     try:
-        from dashboard.live_arb_store import _get_pg_engine as _pg_check
-        _pg_live = _pg_check() is not None
+        import dashboard.live_arb_store as _las_p05
+        _pg_live = (
+            bool(getattr(_las_p05, "_pg_ok", False))
+            or (getattr(_las_p05, "_pg_engine", None) is not None)
+        )
+        if not _pg_live:
+            _pg_live = _las_p05.get_pg_engine_cached() is not None
     except Exception:
         _pg_live = False
+    # Fallback: sidebar already confirmed Neon via _get_pg_engine()
+    if not _pg_live:
+        _pg_live = bool(st.session_state.get("_sidebar_neon_ok", False))
 
-    _scanner_dot = f"<span style='color:#22C55E;'>●</span> {int(_mkts):,} markets" if _ws_connected else f"<span style='color:#6B7280;'>○</span> scanner offline"
-    _db_dot = f"<span style='color:#22C55E;'>Neon</span>" if _pg_live else f"<span style='color:{AMBER};'>SQLite</span>"
+    import os as _os_p05
+    _sk_p05 = _os_p05.environ.get("SYNTHESIS_SECRET_KEY", "").strip()
+    if not _sk_p05:
+        try:
+            _sk_p05 = (st.secrets.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+        except Exception:
+            pass
+    if not _sk_p05:
+        try:
+            for _ns_p05 in st.secrets.values():
+                if hasattr(_ns_p05, "get"):
+                    _sk_p05 = (_ns_p05.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+                    if _sk_p05:
+                        break
+        except Exception:
+            pass
+    _has_key_p05 = bool(_sk_p05)
+    if _ws_connected:
+        _scanner_dot = f"<span style='color:#22C55E;'>●</span> {int(_mkts):,} markets"
+    elif _pg_live:
+        _scanner_dot = f"<span style='color:#22C55E;'>●</span> cloud feed (Neon)"
+    elif _has_key_p05:
+        _scanner_dot = f"<span style='color:#F59E0B;'>◔</span> scanner starting…"
+    else:
+        _scanner_dot = f"<span style='color:#6B7280;'>○</span> scanner offline"
+    _db_dot = f"<span style='color:#22C55E;'>Neon</span>" if _pg_live else f"<span style='color:{AMBER};'>&#8635;&nbsp;Neon</span>"
     st.markdown(
         f"<div style='font-size:0.65rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
         f"margin-bottom:0.75rem;'>{_scanner_dot} &nbsp;·&nbsp; db: {_db_dot}"
-        f"{'&nbsp;·&nbsp; session: ' + str(_sess_total) + ' arbs' if _sess_total > 0 else ''}</div>",
+        f"{'&nbsp;·&nbsp; session: ' + str(_sess_total) + ' detections' if _sess_total > 0 else ''}</div>",
         unsafe_allow_html=True,
     )
 
     # --- Filters ---
     _STRAT_DISPLAY = {
-        "All": "All strategies",
-        "yes_no_complement": "YES/NO Complement",
-        "collectively_exhaustive": "Collectively Exhaustive",
-        "mutually_exclusive": "Mutually Exclusive",
-        "threshold_order": "Threshold Order",
-        "superset": "Superset",
+        "All": "ALL EXECUTABLE",
+        "mutually_exclusive": "MUTUALLY EXCLUSIVE (ME)",
+        "threshold_order": "THRESHOLD ORDER (TH)",
+        "superset": "SUPERSET",
     }
     _STRAT_KEYS = list(_STRAT_DISPLAY.keys())
 
     # min_edge must be known before the DB load so we show it first
     f1, f2, f3, f4 = st.columns(4)
     with f2:
-        min_edge = st.number_input("MIN NET EDGE (c)", value=0.5, step=0.5, format="%.1f")
+        min_edge = st.number_input("MIN NET EDGE (¢)", value=0.5, step=0.5, format="%.1f")
     with f3:
         _sort_options = ["NET EDGE ↓", "NET EDGE ↑", "GROSS EDGE ↓", "TIME ↓", "TIME ↑"]
         _sort_choice = st.selectbox("SORT BY", _sort_options, index=0)
@@ -230,13 +260,7 @@ HISTORICAL ARBITRAGE
 
     # Show OHLC disclaimer banner if any OHLC-sourced rows are present
     if _has_ohlc:
-        st.info(
-            f"**Historical Research Candidates ({_n_ohlc:,} signals)**  \n"
-            "These results come from a historical candlestick scan (`targeted_ohlc` source). "
-            "They represent backtested price patterns, **NOT live executable arbitrages**. "
-            "Edges shown may be inflated vs real market conditions and cannot be assumed "
-            "to be reproducible in a live order book."
-        )
+        st.caption(f"INCLUDES {_n_ohlc:,} OHLC RESEARCH SIGNALS — BACKTESTED PATTERNS, NOT LIVE ARBS")
 
     # Compute per-strategy counts BEFORE showing the dropdown
     _counts: dict = (
@@ -271,10 +295,39 @@ HISTORICAL ARBITRAGE
         df = df[_date_mask]
 
     if _db_err:
-        st.caption(f"DB unavailable — set DATABASE_URL secret to load cloud history.")
+        st.caption(f"DB UNAVAILABLE ({_db_err}) — VERIFY DATABASE_URL SECRET IS SET IN STREAMLIT CLOUD")
 
 
     if df.empty:
+        # --- Neon cloud hint when date range has no local rows ---
+        _neon_cloud_hint = ""
+        try:
+            import dashboard.live_arb_store as _las_p05e
+            from sqlalchemy import text as _p05e_text
+            _eng_p05e = getattr(_las_p05e, "_pg_engine", None) or _las_p05e.get_pg_engine_cached()
+            if _eng_p05e is not None:
+                with _eng_p05e.connect() as _c_p05e:
+                    _row_p05e = _c_p05e.execute(_p05e_text(
+                        "SELECT COUNT(*), MIN(detected_at)::date, MAX(detected_at)::date "
+                        "FROM live_arbs_cloud WHERE strategy_type NOT IN ('yes_no_complement')"
+                    )).fetchone()
+                if _row_p05e and _row_p05e[0]:
+                    _cnt_p05e = int(_row_p05e[0])
+                    _min_dt = str(_row_p05e[1])[:10] if _row_p05e[1] else "--"
+                    _max_dt = str(_row_p05e[2])[:10] if _row_p05e[2] else "--"
+                    _neon_cloud_hint = (
+                        f"<div style='margin-bottom:0.85rem;padding:0.5rem 0.85rem;"
+                        f"background:rgba(34,197,94,0.06);border:1px solid #22C55E44;"
+                        f"border-left:3px solid #22C55E;border-radius:3px;"
+                        f"font-size:0.7rem;font-family:JetBrains Mono,monospace;color:{TEXT2};line-height:1.7;'>"
+                        f"<span style='color:#22C55E;font-size:0.6rem;letter-spacing:0.1em;"
+                        f"text-transform:uppercase;'>NEON CLOUD — {_cnt_p05e} ARBS ON RECORD</span><br>"
+                        f"Range: {_min_dt} → {_max_dt} · widen DATE RANGE above to see them"
+                        f"</div>"
+                    )
+        except Exception:
+            pass
+
         # --- Inline scanner status for empty state ---
         _scanner_html_badge = ""
         try:
@@ -293,9 +346,7 @@ HISTORICAL ARBITRAGE
                     f"text-transform:uppercase;'>● SCANNER CONNECTED</span><br>"
                     f"MARKETS TRACKED: <b style='color:{TEXT};'>{int(_mkts_es):,}</b>"
                     f"&nbsp;&nbsp;MSG/S: <b style='color:{TEXT};'>{float(_rate_es):.1f}</b><br>"
-                    f"<span style='color:{TEXT3};font-size:0.65rem;'>"
-                    f"Arbs should appear here within minutes if any exist on Kalshi right now."
-                    f"</span></div>"
+                    f"</div>"
                 )
             else:
                 _scanner_html_badge = (
@@ -305,40 +356,79 @@ HISTORICAL ARBITRAGE
                     f"color:{TEXT2};line-height:1.7;'>"
                     f"<span style='color:{AMBER};font-size:0.62rem;letter-spacing:0.1em;"
                     f"text-transform:uppercase;'>○ SCANNER NOT CONNECTED</span><br>"
-                    f"<span style='color:{TEXT3};font-size:0.65rem;'>"
-                    f"Start the scanner to begin detecting arbs. See step 1 below."
-                    f"</span></div>"
+                    f"</div>"
                 )
         except Exception:
             pass
 
-        st.markdown(
-            f"<div style='background:{PANEL};border:1px solid {BORDER};"
-            f"border-left:4px solid {BLUE};border-radius:4px;"
-            f"padding:1.1rem 1.3rem 1rem 1.3rem;margin-top:0.25rem;'>"
-            f"{_scanner_html_badge}"
-            f"<div style='font-size:0.72rem;color:{TEXT2};font-family:Inter,sans-serif;"
-            f"line-height:1.75;'>"
-            f"<div style='font-size:0.62rem;letter-spacing:0.1em;text-transform:uppercase;"
-            f"color:{TEXT3};margin-bottom:0.6rem;'>NO ARBS IN DATABASE YET</div>"
-            f"The scanner writes arbs to the database as they are detected. "
-            f"With the scanner running, arbs should appear here within minutes "
-            f"if any exist on Kalshi right now.<br><br>"
-            f"<b style='color:{TEXT};font-size:0.68rem;letter-spacing:0.05em;'>TO START SEEING ARBS HERE:</b><br>"
-            f"<span style='color:{CYAN};'>1.</span>&nbsp; Start the WebSocket scanner: "
-            f"<code style='background:rgba(255,255,255,0.06);padding:0.1rem 0.35rem;"
-            f"border-radius:2px;font-size:0.68rem;'>python ws_bridge.py</code> "
-            f"(or the Streamlit Cloud background process)<br>"
-            f"<span style='color:{CYAN};'>2.</span>&nbsp; The scanner checks all markets every second "
-            f"and writes any arb it finds to this database automatically.<br>"
-            f"<span style='color:{CYAN};'>3.</span>&nbsp; Arbs persist across restarts — once saved "
-            f"they always appear here.<br><br>"
-            f"<span style='color:{TEXT3};font-size:0.67rem;'>"
-            f"All five strategy types are scanned: YES/NO complement, collectively exhaustive, "
-            f"mutually exclusive, threshold order, and superset.</span>"
-            f"</div></div>",
-            unsafe_allow_html=True,
-        )
+        if _neon_cloud_hint:
+            st.markdown(_neon_cloud_hint, unsafe_allow_html=True)
+        if _scanner_html_badge:
+            st.markdown(_scanner_html_badge, unsafe_allow_html=True)
+        st.caption("No detections in selected date range · scanner active")
+        # --- Neon arb table in empty state ---
+        try:
+            import dashboard.live_arb_store as _las_p05t
+            from sqlalchemy import text as _p05t_text
+            _eng_p05t = getattr(_las_p05t, "_pg_engine", None) or _las_p05t.get_pg_engine_cached()
+            if _eng_p05t is not None:
+                import pandas as _pd_p05t
+                import time as _p05t_time
+                _now_p05t = _p05t_time.time()
+                with _eng_p05t.connect() as _c_p05t:
+                    _rows_p05t = _c_p05t.execute(_p05t_text(
+                        "SELECT ticker, strategy_type, net_edge_cents, gross_edge_cents, "
+                        "yes_ask, no_ask, detected_at::text "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type IN ('mutually_exclusive','threshold_order') "
+                        "AND net_edge_cents > 0 "
+                        "ORDER BY detected_at DESC LIMIT 15"
+                    )).fetchall()
+                if _rows_p05t:
+                    _STRAT_P05T = {
+                        "mutually_exclusive": "ME", "threshold_order": "TH",
+                        "yes_no_complement": "YNC", "collectively_exhaustive": "CE",
+                        "superset": "SS",
+                    }
+                    def _p05t_age(s):
+                        try:
+                            _ts = _pd_p05t.to_datetime(s, utc=True).timestamp()
+                            _sec = _now_p05t - _ts
+                            if _sec < 3600: return f"{int(_sec//60)}m ago"
+                            if _sec < 86400: return f"{int(_sec//3600)}h ago"
+                            return f"{int(_sec//86400)}d ago"
+                        except Exception:
+                            return str(s)[:10] if s else "--"
+                    st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                        f"color:#22C55E;margin:0.5rem 0 0.4rem;'>● NEON CLOUD — RECENT ARBS</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _df_p05t = _pd_p05t.DataFrame(
+                        _rows_p05t,
+                        columns=["TICKER", "STRATEGY", "NET EDGE (¢)", "GROSS EDGE (¢)", "YES ASK", "NO ASK", "AGE"],
+                    )
+                    _df_p05t["STRATEGY"] = _df_p05t["STRATEGY"].apply(
+                        lambda s: _STRAT_P05T.get(str(s), str(s).upper()[:4])
+                    )
+                    _df_p05t["NET EDGE (¢)"] = _df_p05t["NET EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v is not None else "--"
+                    )
+                    _df_p05t["GROSS EDGE (¢)"] = _df_p05t["GROSS EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v is not None else "--"
+                    )
+                    _df_p05t["YES ASK"] = _df_p05t["YES ASK"].apply(
+                        lambda v: f"{float(v):.3f}" if v is not None else "--"
+                    )
+                    _df_p05t["NO ASK"] = _df_p05t["NO ASK"].apply(
+                        lambda v: f"{float(v):.3f}" if v is not None else "--"
+                    )
+                    _df_p05t["AGE"] = _df_p05t["AGE"].apply(_p05t_age)
+                    st.dataframe(_df_p05t, use_container_width=True, hide_index=True)
+                    st.caption(f"{len(_rows_p05t)} MOST RECENT ARBS FROM NEON · WIDEN DATE RANGE TO LOAD MORE")
+        except Exception:
+            pass
         # Still show session queue arbs if the scanner has found any this session
         try:
             from dashboard.live_state import get_live_state as _gls5
@@ -362,24 +452,21 @@ HISTORICAL ARBITRAGE
                     _rows5.append({
                         "TIME":     _t5,
                         "TICKER":   _o5.get("ticker", "--"),
-                        "STRATEGY": str(_o5.get("strategy", "--")).upper().replace("_", " "),
-                        "GROSS":    f"{float(_o5.get('gross_edge_cents', 0)):.2f}c",
-                        "NET EDGE": f"+{float(_o5.get('net_edge_cents', 0)):.2f}c",
+                        "STRATEGY": {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}.get(str(_o5.get("strategy", "--")).lower(), str(_o5.get("strategy", "--")).upper()[:6]),
+                        "GROSS":    f"{float(_o5.get('gross_edge_cents', 0)):.2f}¢",
+                        "NET EDGE": f"+{float(_o5.get('net_edge_cents', 0)):.2f}¢",
                         "QTY":      str(int(_o5.get("executable_contracts", 0) or 0)),
                     })
                 st.dataframe(pd.DataFrame(_rows5), use_container_width=True,
                              height=min(400, 35 * len(_rows5) + 45), hide_index=True)
         except Exception as _e5:
-            st.caption(f"⚠️ Could not display session detections: {type(_e5).__name__}")
+            st.caption(f"COULD NOT DISPLAY SESSION DETECTIONS: {type(_e5).__name__}")
         return
 
     n = len(df)
 
     if n == 0:
-        st.info(
-            "No arbs or historical research candidates found in the selected filters. "
-            "Try widening the date range or removing strategy/edge filters."
-        )
+        st.caption("NO RECORDS MATCH THE CURRENT FILTERS")
         return
 
     # --- KPI row ---
@@ -403,11 +490,14 @@ HISTORICAL ARBITRAGE
     _arbs_per_hour = n_today / _hours_elapsed
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("TODAY", f"{n_today:,}")
-    k2.metric("IN RANGE", f"{n:,}")
-    k3.metric("BEST EDGE", f"{_best_edge:.2f}c" if len(edges) > 0 else "--")
-    k4.metric("AVG EDGE", f"{_avg_edge_cents:.2f}c" if len(edges) > 0 else "--")
-    k5.metric("RATE", f"{_arbs_per_hour:.1f}/hr" if n_today > 0 else "--")
+    k1.metric("TODAY", f"{n_today:,}", help="CE/ME/TH executable arb detections today")
+    k2.metric("IN RANGE", f"{n:,}", help="CE/ME/TH executable arb detections in selected range")
+    k3.metric("BEST EDGE", f"{_best_edge:.2f}¢" if len(edges) > 0 else "--",
+              help="BEST NET EDGE IN VIEW")
+    k4.metric("AVG EDGE", f"{_avg_edge_cents:.2f}¢" if len(edges) > 0 else "--",
+              help="MEAN NET EDGE IN VIEW")
+    k5.metric("RATE", f"{_arbs_per_hour:.1f}/hr" if n_today > 0 else "--",
+              help="Executable arb detections today divided by hours elapsed")
 
     # --- Analytics expander (charts + breakdowns, collapsed by default) ---
     def _section_header_inner(t):
@@ -416,7 +506,7 @@ HISTORICAL ARBITRAGE
             f"text-transform:uppercase;color:{AMBER};margin:0.6rem 0 0.2rem 0;'>{t}</div>",
             unsafe_allow_html=True,
         )
-    with st.expander("📊 Analytics", expanded=False):
+    with st.expander("ANALYTICS", expanded=False):
         _section_header_inner("BY STRATEGY")
         _strat_breakdown_loaded = False
         try:
@@ -430,11 +520,11 @@ HISTORICAL ARBITRAGE
                     _avg_g = _st_gross_s.mean() if len(_st_gross_s.dropna()) > 0 else float("nan")
                     _best_n = _st_net_s.max() if len(_st_net_s.dropna()) > 0 else float("nan")
                     _strat_rows_db.append({
-                        "Strategy": str(_st_key),
-                        "Count": _st_count,
-                        "Avg Net (¢)": f"{_avg_n:.2f}" if pd.notna(_avg_n) else "--",
-                        "Avg Gross (¢)": f"{_avg_g:.2f}" if pd.notna(_avg_g) else "--",
-                        "Best (¢)": f"{_best_n:.2f}" if pd.notna(_best_n) else "--",
+                        "STRATEGY": str(_st_key),
+                        "COUNT": _st_count,
+                        "AVG NET (¢)": f"{_avg_n:.2f}" if pd.notna(_avg_n) else "--",
+                        "AVG GROSS (¢)": f"{_avg_g:.2f}" if pd.notna(_avg_g) else "--",
+                        "BEST (¢)": f"{_best_n:.2f}" if pd.notna(_best_n) else "--",
                         "_avg_net_num": float(_avg_n) if pd.notna(_avg_n) else 0.0,
                         "_count": _st_count,
                     })
@@ -459,10 +549,10 @@ HISTORICAL ARBITRAGE
                         return "color:#F59E0B;font-weight:600;"
                     return "color:#6B7280;"
 
-                _styled_strat = _display_strat_df.style.applymap(_color_count, subset=["Count"])
+                _styled_strat = _display_strat_df.style.applymap(_color_count, subset=["COUNT"])
                 st.dataframe(_styled_strat, use_container_width=True, hide_index=True)
 
-                _chart_labels = _strat_grp_df["Strategy"].tolist()
+                _chart_labels = _strat_grp_df["STRATEGY"].tolist()
                 _chart_vals = _strat_grp_df["_avg_net_num"].tolist()
                 _STRAT_COLORS_PERF = {
                     "yes_no_complement": "#3B82F6", "collectively_exhaustive": "#22C55E",
@@ -478,14 +568,14 @@ HISTORICAL ARBITRAGE
                         y=_chart_vals,
                         marker_color=[_STRAT_COLORS_PERF.get(s, "#64748B") for s in _chart_labels],
                         marker_line_width=0,
-                        text=[f"{v:.2f}c" for v in _chart_vals],
+                        text=[f"{v:.2f}¢" for v in _chart_vals],
                         textposition="outside", cliponaxis=False,
                     ))
                     _perf_fig.update_layout(**plotly_dark_layout(
                         title={"text": "AVG NET EDGE BY STRATEGY (¢)", "font": {"size": 10, "color": TEXT3}},
                         height=200, showlegend=False,
                         margin={"l": 30, "r": 30, "t": 35, "b": 30},
-                        xaxis_title="", yaxis_title="Avg Net (¢)",
+                        xaxis_title="", yaxis_title="AVG NET (¢)",
                     ))
                     st.plotly_chart(_perf_fig, use_container_width=True)
         except Exception:
@@ -505,7 +595,7 @@ HISTORICAL ARBITRAGE
                     _mkt_fig.update_layout(**plotly_dark_layout(
                         height=200, showlegend=False,
                         margin={"l": 160, "r": 40, "t": 10, "b": 30},
-                        xaxis_title="Arb Count", yaxis={"automargin": True},
+                        xaxis_title="ARB COUNT", yaxis={"automargin": True},
                     ))
                     st.plotly_chart(_mkt_fig, use_container_width=True)
         except Exception:
@@ -529,7 +619,7 @@ HISTORICAL ARBITRAGE
                     marker_color="#22C55E", marker_line_width=0,
                 ))
                 _fig.update_layout(**plotly_dark_layout(
-                    height=180, xaxis_title="Hour of Day (ET)", yaxis_title="Count",
+                    height=180, xaxis_title="HOUR OF DAY (ET)", yaxis_title="COUNT",
                     xaxis={"tickmode": "linear", "dtick": 1},
                     margin={"l": 40, "r": 20, "t": 15, "b": 40},
                 ))
@@ -548,9 +638,9 @@ HISTORICAL ARBITRAGE
                         colorscale="Greens", showscale=True,
                     ))
                     _hm_fig.update_layout(**plotly_dark_layout(
-                        title={"text": "HEATMAP (Hour × Day)", "font": {"size": 10, "color": TEXT3}},
+                        title={"text": "HEATMAP (HOUR × DAY)", "font": {"size": 10, "color": TEXT3}},
                         height=200,
-                        xaxis={"title": "Hour (ET)", "tickmode": "linear", "dtick": 1},
+                        xaxis={"title": "HOUR (ET)", "tickmode": "linear", "dtick": 1},
                         yaxis={"automargin": True},
                         margin={"l": 50, "r": 20, "t": 30, "b": 40},
                     ))
@@ -650,7 +740,7 @@ HISTORICAL ARBITRAGE
     for col in ["gross_edge_cents", "fees_cents", "net_edge_cents"]:
         if col in disp.columns:
             disp[col] = pd.to_numeric(disp[col], errors="coerce").apply(
-                lambda v: f"{v:.2f}c" if pd.notna(v) else "--"
+                lambda v: f"{v:.2f}¢" if pd.notna(v) else "--"
             )
 
     # Prefer executable_contracts over qty to avoid duplicate "QTY" columns
@@ -665,25 +755,25 @@ HISTORICAL ARBITRAGE
     rename = {
         "ticker": "TICKER", "strategy_type": "STRATEGY",
         "classification": "CLASS", "confidence": "CONF",
-        "gross_edge_cents": "GROSS", "fees_cents": "FEES",
-        "net_edge_cents": "NET EDGE", "qty": "QTY", "executable_contracts": "QTY",
+        "gross_edge_cents": "GROSS (¢)", "fees_cents": "FEES (¢)",
+        "net_edge_cents": "NET EDGE (¢)", "qty": "QTY", "executable_contracts": "QTY",
         "detected_at": "DETECTED_AT_UTC",
     }
     # --- Apply sort ---
     _disp_out = disp[show].rename(columns=rename)
     _sort_col_map = {
-        "NET EDGE ↓":   ("NET EDGE",   False),
-        "NET EDGE ↑":   ("NET EDGE",   True),
-        "GROSS EDGE ↓": ("GROSS",      False),
-        "TIME ↓":       ("TIME",       False),
-        "TIME ↑":       ("TIME",       True),
+        "NET EDGE ↓":   ("NET EDGE (¢)",   False),
+        "NET EDGE ↑":   ("NET EDGE (¢)",   True),
+        "GROSS EDGE ↓": ("GROSS (¢)",      False),
+        "TIME ↓":       ("TIME",           False),
+        "TIME ↑":       ("TIME",           True),
     }
-    _sc, _asc = _sort_col_map.get(_sort_choice, ("NET EDGE", False))
+    _sc, _asc = _sort_col_map.get(_sort_choice, ("NET EDGE (¢)", False))
     if _sc in _disp_out.columns:
-        # NET EDGE / GROSS columns are formatted strings like "1.50c"; strip for sort
-        if _sc in ("NET EDGE", "GROSS"):
+        # NET EDGE / GROSS columns are formatted strings like "1.50¢"; strip for sort
+        if _sc in ("NET EDGE (¢)", "GROSS (¢)"):
             _sort_key = pd.to_numeric(
-                _disp_out[_sc].astype(str).str.replace("c", "", regex=False).str.replace("--", "nan", regex=False),
+                _disp_out[_sc].astype(str).str.replace("¢", "", regex=False).str.replace("c", "", regex=False).str.replace("+", "", regex=False).str.replace("--", "nan", regex=False),
                 errors="coerce",
             )
             _disp_out = (
@@ -695,7 +785,7 @@ HISTORICAL ARBITRAGE
         else:
             _disp_out = _disp_out.sort_values(_sc, ascending=_asc, na_position="last")
     if "net_edge_cents" in df.columns and (pd.to_numeric(df["net_edge_cents"], errors="coerce") > 50).any():
-        st.caption("Some records show edge >50c — pre-fix scanner data. Current scanner caps CE gross at 25c.")
+        st.caption("Some records show edge >50¢ — pre-fix scanner data (stale-book false positives) · CE scanner now active")
 
     # --- Total executed P&L metric ---
     _exec_col = next((c for c in df.columns if c in ("executed", "is_executed")), None)
@@ -703,7 +793,7 @@ HISTORICAL ARBITRAGE
         _exec_mask = df[_exec_col].astype(str).str.lower().isin({"1", "true", "yes"})
         _exec_net = pd.to_numeric(df.loc[_exec_mask, "net_edge_cents"] if "net_edge_cents" in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
         _exec_pnl_cents = float(_exec_net.sum())
-        st.metric("TOTAL EXECUTED P&L", f"{_exec_pnl_cents:+.2f}c",
+        st.metric("TOTAL EXECUTED P&L", f"{_exec_pnl_cents:+.2f}¢",
                   help="Sum of net_edge_cents for rows where executed=True")
 
     # --- Classification color coding ---
@@ -727,7 +817,7 @@ HISTORICAL ARBITRAGE
 
     # --- Summary Stats expander ---
     if len(df) > 0:
-        with st.expander("📊 Summary Stats", expanded=False):
+        with st.expander("SUMMARY STATS", expanded=False):
             _ss_edges = pd.to_numeric(df.get("net_edge_cents", pd.Series(dtype=float)), errors="coerce").dropna()
             _ss_gross = pd.to_numeric(df.get("gross_edge_cents", pd.Series(dtype=float)), errors="coerce").dropna()
             _ss_total = len(df)
@@ -750,33 +840,28 @@ HISTORICAL ARBITRAGE
                     _ss_hour_counts = _ss_ts.dt.hour.value_counts()
                     if not _ss_hour_counts.empty:
                         _ss_top_hr = int(_ss_hour_counts.idxmax())
-                        _ss_most_active_hour = f"{_ss_top_hr:02d}:00 ET ({_ss_hour_counts.iloc[0]} arbs)"
+                        _ss_most_active_hour = f"{_ss_top_hr:02d}:00 ET ({_ss_hour_counts.iloc[0]} detections)"
                 except Exception:
                     pass
             _ssc1, _ssc2, _ssc3 = st.columns(3)
             _ssc1.metric(
-                "Total Arbs" if not _has_ohlc else "Total (Arbs + Historical Signals)",
+                "TOTAL RECORDS" if not _has_ohlc else "Total (Records + Historical Signals)",
                 f"{_ss_total:,}",
             )
-            _ssc2.metric("Avg Net Edge", f"{_ss_avg_net:.2f}c" if not pd.isna(_ss_avg_net) else "--")
-            _ssc3.metric("Median Gross Edge", f"{_ss_med_gross:.2f}c" if not pd.isna(_ss_med_gross) else "--")
+            _ssc2.metric("AVG NET EDGE", f"{_ss_avg_net:.2f}¢" if not pd.isna(_ss_avg_net) else "--")
+            _ssc3.metric("MEDIAN GROSS EDGE", f"{_ss_med_gross:.2f}¢" if not pd.isna(_ss_med_gross) else "--")
             _ssc4, _ssc5 = st.columns(2)
-            _ssc4.metric("Best Single Arb", f"{_ss_best_edge:.2f}c" if not pd.isna(_ss_best_edge) else "--",
+            _ssc4.metric("BEST SINGLE ARB", f"{_ss_best_edge:.2f}¢" if not pd.isna(_ss_best_edge) else "--",
                          help=_ss_best_ticker)
-            _ssc5.metric("Most Active Hour", _ss_most_active_hour)
+            _ssc5.metric("MOST ACTIVE HOUR", _ss_most_active_hour)
             if not pd.isna(_ss_best_edge):
-                st.caption(f"Best arb ticker: {_ss_best_ticker}")
+                st.caption(f"BEST DETECTION TICKER: {_ss_best_ticker}")
 
     # --- Classification upgrade path note (shown when Class C or D arbs are present) ---
     if not _disp_out.empty and "CLASS" in _disp_out.columns:
         _has_c_or_d = _disp_out["CLASS"].astype(str).str.strip().str.upper().isin({"C", "D"}).any()
         if _has_c_or_d:
-            st.info("""
-📈 **Classification Upgrade Path**
-- Class C → B: Confirmed on next snapshot with consistent pricing
-- Class B → A: Verified against live L2 orderbook with sufficient depth
-- Class D: Fee-killed — gross edge too small to survive Kalshi's taker fee
-""")
+            st.caption("C→B: repriced consistently; B→A: verified on live L2; D: fee-killed")
 
     # --- Arb detail drilldown ---
     _STRAT_BADGE_COLORS = {
@@ -789,7 +874,7 @@ HISTORICAL ARBITRAGE
     _detail_options = df["id"].tolist() if "id" in df.columns else df.index.tolist()
     if _detail_options:
         _sel = st.selectbox(
-            "Select arb to inspect",
+            "SELECT DETECTION TO INSPECT",
             options=_detail_options,
             key="p05_detail_select",
         )
@@ -844,15 +929,15 @@ HISTORICAL ARBITRAGE
                 _dc1, _dc2, _dc3 = st.columns(3)
                 _dc1.metric(
                     "GROSS EDGE",
-                    f"{_gross_raw:.2f}c" if pd.notna(_gross_raw) else "—",
+                    f"{_gross_raw:.2f}¢" if pd.notna(_gross_raw) else "—",
                 )
                 _dc2.metric(
                     "NET EDGE",
-                    f"{_net_raw:.2f}c" if pd.notna(_net_raw) else "—",
+                    f"{_net_raw:.2f}¢" if pd.notna(_net_raw) else "—",
                 )
                 _dc3.metric(
                     "FEE PAID",
-                    f"{_fee_paid:.2f}c" if pd.notna(_fee_paid) else "—",
+                    f"{_fee_paid:.2f}¢" if pd.notna(_fee_paid) else "—",
                     help="gross_edge − net_edge",
                 )
                 # Timestamp
@@ -927,24 +1012,24 @@ HISTORICAL ARBITRAGE
 
                 _dd_sim_col, _dd_freq_col = st.columns(2)
                 _dd_sim_col.metric(
-                    "SIMILAR ARBS (±24h, same ticker)",
+                    "SIMILAR DETECTIONS (±24h, same ticker)",
                     f"{_similar_count:,}" if _similar_count is not None else "—",
-                    help="Arbs with same ticker within 24h of this arb",
+                    help="Detections with same ticker within 24h",
                 )
                 _dd_freq_col.metric(
                     "TICKER FREQUENCY (all-time)",
                     f"{_ticker_freq:,}" if _ticker_freq is not None else "—",
-                    help="Total times this ticker has appeared in arb history",
+                    help="Total times this ticker has appeared in detection history",
                 )
 
                 # Copy arb details
                 _copy_lines = [
                     f"Ticker:     {_ticker_dd}",
-                    f"Strategy:   {_strat_raw.replace('_', ' ').upper()}",
+                    "Strategy:   " + {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}.get(str(_strat_raw).lower(), str(_strat_raw).upper()[:6]),
                     f"Detected:   {_det_display}",
-                    f"Gross Edge: {f'{_gross_raw:.2f}c' if pd.notna(_gross_raw) else '—'}",
-                    f"Net Edge:   {f'{_net_raw:.2f}c' if pd.notna(_net_raw) else '—'}",
-                    f"Fee Paid:   {f'{_fee_paid:.2f}c' if pd.notna(_fee_paid) else '—'}",
+                    f"Gross Edge: {f'{_gross_raw:.2f}¢' if pd.notna(_gross_raw) else '—'}",
+                    f"Net Edge:   {f'{_net_raw:.2f}¢' if pd.notna(_net_raw) else '—'}",
+                    f"Fee Paid:   {f'{_fee_paid:.2f}¢' if pd.notna(_fee_paid) else '—'}",
                 ]
                 _cls_dd = str(_row.get("classification") or "")
                 if _cls_dd:
@@ -959,17 +1044,17 @@ HISTORICAL ARBITRAGE
                     _copy_lines.append(f"Freq (DB):  {_ticker_freq} total · {_similar_count} within ±24h")
                 st.markdown(
                     f"<div style='font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;"
-                    f"color:{TEXT3};margin:0.5rem 0 2px 0;'>Copy arb details</div>",
+                    f"color:{TEXT3};margin:0.5rem 0 2px 0;'>Copy detection details</div>",
                     unsafe_allow_html=True,
                 )
                 st.code("\n".join(_copy_lines), language=None)
                 # Copy ticker text_input (read-only display for easy copy-paste to Kalshi)
                 if _ticker_dd:
                     st.text_input(
-                        "Copy ticker",
+                        "COPY TICKER",
                         value=_ticker_dd,
                         key=f"p05_copy_ticker_{_sel}",
-                        help="Select all and copy to paste this ticker directly into Kalshi",
+                        help="SELECT ALL AND COPY TO PASTE THIS TICKER DIRECTLY INTO KALSHI",
                         disabled=True,
                     )
                     _dd_info = _resolve_info(_ticker_dd, _strat_raw)
@@ -989,15 +1074,26 @@ HISTORICAL ARBITRAGE
                         for _smr in _all_live_sim:
                             _smr_tk = str(_smr.get("ticker") or "")
                             if _smr_tk.startswith(_event_prefix) and _smr.get("id") != _sel:
+                                def _p05_sim_age(v):
+                                    if not v or str(v) == "--":
+                                        return "--"
+                                    try:
+                                        import time as _p05_sim_t
+                                        _s = _p05_sim_t.time() - pd.to_datetime(v, utc=True).timestamp()
+                                        if _s < 3600: return f"{int(_s // 60)}m ago"
+                                        if _s < 86400: return f"{int(_s // 3600)}h ago"
+                                        return f"{int(_s // 86400)}d ago"
+                                    except Exception:
+                                        return str(v)[:10]
                                 _sim_market_rows.append({
                                     "TICKER": _smr_tk,
-                                    "STRATEGY": str(_smr.get("strategy_type") or "--").replace("_", " ").upper(),
-                                    "NET EDGE (c)": f"{float(_smr.get('net_edge_cents', 0)):.2f}",
-                                    "DETECTED": str(_smr.get("detected_at") or "--")[:19],
+                                    "STRATEGY": {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}.get(str(_smr.get("strategy_type") or "").lower(), str(_smr.get("strategy_type") or "--").upper()[:6]),
+                                    "NET EDGE (¢)": f"{float(_smr.get('net_edge_cents', 0)):.2f}",
+                                    "AGE": _p05_sim_age(_smr.get("detected_at")),
                                 })
                         _sim_market_rows = sorted(
                             _sim_market_rows,
-                            key=lambda x: float(x["NET EDGE (c)"].replace("--", "0")),
+                            key=lambda x: float(x["NET EDGE (¢)"].replace("--", "0")),
                             reverse=True,
                         )[:10]
                     except Exception:
@@ -1024,10 +1120,10 @@ HISTORICAL ARBITRAGE
             _cls_b = _top_df[_top_df["classification"].astype(str).str.strip().str.upper() == "B"]
             if not _cls_a.empty:
                 _lead_src = _cls_a
-                _lead_label = "Class A"
+                _lead_label = "CLASS A"
             elif not _cls_b.empty:
                 _lead_src = _cls_b
-                _lead_label = "Class B"
+                _lead_label = "CLASS B"
             else:
                 _lead_src = pd.DataFrame()
                 _lead_label = ""
@@ -1038,11 +1134,11 @@ HISTORICAL ARBITRAGE
                 for _, r in _lead_src.iterrows()
             } - {""})
             _lead_strat_filter = st.multiselect(
-                "Strategy filter",
+                "STRATEGY FILTER",
                 options=_all_strat_labels,
                 default=_all_strat_labels,
                 key="p05_lead_strat_filter",
-                help="Filter leaderboard by strategy type",
+                help="FILTER LEADERBOARD BY STRATEGY TYPE",
             )
             if _lead_strat_filter and len(_lead_strat_filter) < len(_all_strat_labels):
                 _lead_src = _lead_src[
@@ -1053,7 +1149,7 @@ HISTORICAL ARBITRAGE
                     .isin(_lead_strat_filter)
                 ]
 
-            _section_header("TROPHY TOP ARBS LEADERBOARD")
+            _section_header("TOP DETECTIONS LEADERBOARD")
             if not _lead_src.empty:
                 _lead_src = _lead_src.copy()
                 _lead_src["_net_num"] = pd.to_numeric(_lead_src["net_edge_cents"], errors="coerce")
@@ -1066,7 +1162,7 @@ HISTORICAL ARBITRAGE
                 _lead_rows = []
                 for _ri, _rrow in _top10.iterrows():
                     _ticker = str(_rrow.get("ticker") or _rrow.get("TICKER") or "--")
-                    _strat  = str(_rrow.get("strategy_type") or "--").replace("_", " ").upper()
+                    _strat  = {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}.get(str(_rrow.get("strategy_type") or "").lower(), str(_rrow.get("strategy_type") or "--").upper()[:6])
                     _net_v  = pd.to_numeric(_rrow.get("net_edge_cents"), errors="coerce")
                     _det    = _rrow.get("detected_at") or "--"
                     try:
@@ -1093,23 +1189,23 @@ HISTORICAL ARBITRAGE
                     _rank_label = f"🏆 #1" if _ri == 0 else f"#{_ri + 1}"
                     _net_display = f"{_net_v:.2f}" if pd.notna(_net_v) else "--"
                     _row_source = str(_rrow.get("source") or "").lower()
-                    _source_label = "OHLC Scan" if _row_source == "targeted_ohlc" else "Live Scanner"
+                    _source_label = "OHLC SCAN" if _row_source == "targeted_ohlc" else "LIVE SCANNER"
                     _lead_rows.append({
                         "RANK": _rank_label,
                         "TICKER": _ticker,
                         "STRATEGY": _strat,
-                        "NET EDGE (c)": _net_display,
+                        "NET EDGE (¢)": _net_display,
                         "SOURCE": _source_label,
                         "AGE": _age_str,
                         "DETECTED": _det_str,
                     })
-                st.caption(f"Top 10 by net edge — {_lead_label} only")
+                st.caption(f"TOP 10 BY NET EDGE — {_lead_label.upper()} ONLY")
                 _lead_df = pd.DataFrame(_lead_rows)
 
-                # Color the NET EDGE (c) column
+                # Color the NET EDGE (¢) column
                 def _color_net_edge(val: str):
                     try:
-                        v = float(str(val).replace("c", "").strip())
+                        v = float(str(val).replace("¢", "").replace("c", "").strip())
                     except Exception:
                         return ""
                     if v > 5:
@@ -1119,7 +1215,7 @@ HISTORICAL ARBITRAGE
                     else:
                         return "color:#EF4444;"
 
-                _styled_lead = _lead_df.style.applymap(_color_net_edge, subset=["NET EDGE (c)"])
+                _styled_lead = _lead_df.style.applymap(_color_net_edge, subset=["NET EDGE (¢)"])
                 st.dataframe(
                     _styled_lead,
                     use_container_width=True,
@@ -1132,7 +1228,7 @@ HISTORICAL ARBITRAGE
                     _top_ticker = _lead_rows[0]["TICKER"]
                     st.markdown(
                         f"<div style='font-size:0.58rem;color:{TEXT3};letter-spacing:0.06em;"
-                        f"text-transform:uppercase;margin-top:0.3rem;margin-bottom:2px;'>Top ticker (select to copy)</div>",
+                        f"text-transform:uppercase;margin-top:0.3rem;margin-bottom:2px;'>TOP TICKER (SELECT TO COPY)</div>",
                         unsafe_allow_html=True,
                     )
                     st.code(_top_ticker, language=None)
@@ -1158,11 +1254,11 @@ HISTORICAL ARBITRAGE
                             _med_gap_str = f"{_med_gap_sec / 3600:.1f}h"
                         else:
                             _med_gap_str = f"{_med_gap_sec / 86400:.1f}d"
-                        st.caption(f"Median time between top arbs: {_med_gap_str}")
+                        st.caption(f"MEDIAN TIME BETWEEN TOP RECORDS: {_med_gap_str.upper()}")
                 except Exception:
                     pass
             else:
-                st.info("No confirmed arbs in dataset yet")
+                st.caption("NO RECORDS IN DATASET YET")
     except Exception:
         pass
 
@@ -1180,7 +1276,7 @@ HISTORICAL ARBITRAGE
     _dl_label_suffix = (
         f"{_n_live:,} live detections + {_n_ohlc:,} historical signals"
         if _has_ohlc and _n_live > 0
-        else (f"{_n_ohlc:,} historical research candidates" if _has_ohlc else f"{len(_export_df):,} arbs")
+        else (f"{_n_ohlc:,} historical research candidates" if _has_ohlc else f"{len(_export_df):,} executable arb detections")
     )
     st.download_button(
         label=f"⬇ Download CSV — {_dl_label_suffix} ({_date_from.strftime('%b %d')} – {_date_to.strftime('%b %d, %Y')})",
