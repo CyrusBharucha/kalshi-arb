@@ -1,0 +1,9 @@
+# Dev/test deps — NOT installed on Streamlit Cloud
+-r requirements.txt
+
+alembic>=1.13
+asyncpg>=0.29
+playwright>=1.44
+pytest>=8.2
+pytest-asyncio>=0.23
+tqdm>=4.66

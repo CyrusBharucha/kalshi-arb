@@ -92,17 +92,18 @@ to database snapshot values when either is unavailable
                  "2024-04-10","2024-06-05","2024-07-24","2024-09-04","2024-10-23",
                  "2024-12-11","2025-01-29","2025-03-12","2025-04-16","2025-06-04",
                  "2025-07-30","2025-09-17","2026-01-28","2026-03-11","2026-04-16",
-                 "2026-06-04","2026-07-30"],
+                 "2026-06-04","2026-07-30","2026-09-09"],
         "rate": [5.00, 5.00, 5.00, 5.00, 5.00, 5.00, 4.75, 4.50, 4.25, 3.75,
                  3.25, 3.00, 2.75, 2.75, 2.75, 2.50, 2.50, 2.25, 2.25, 2.25,
-                 2.25, 2.25],
+                 2.25, 2.25, 2.25],
     })
     boc_history["date"] = _pd_boc_hist.to_datetime(boc_history["date"])
     st.line_chart(boc_history.set_index("date"))
-    st.caption("Source: Bank of Canada — hardcoded through 2026-07-30; next decision Sep 9, 2026")
+    st.caption("Source: Bank of Canada — hardcoded through 2026-09-09; next decision Oct 28, 2026")
 
     # --- Recent BOC rate decisions (hardcoded reference table) -----
     _boc_history = pd.DataFrame([
+        {"Date": "2026-09-09", "Decision": "Hold",    "Rate After": "2.25%"},
         {"Date": "2026-07-30", "Decision": "Hold",    "Rate After": "2.25%"},
         {"Date": "2026-06-04", "Decision": "Hold",    "Rate After": "2.25%"},
         {"Date": "2026-04-16", "Decision": "Hold",    "Rate After": "2.25%"},
@@ -115,7 +116,7 @@ to database snapshot values when either is unavailable
         {"Date": "2025-01-29", "Decision": "-25bps",  "Rate After": "3.00%"},
     ])
     st.dataframe(_boc_history, use_container_width=False, hide_index=True)
-    st.caption("Recent BOC decisions through 2026-07-30 — next decision 2026-09-09 (reference only)")
+    st.caption("Recent BOC decisions through 2026-09-09 — next decision 2026-10-28 (reference only)")
 
     # --- Live BOC data + next policy meeting countdown -----
     render_boc_panel(show_countdown=True)
@@ -129,14 +130,13 @@ to database snapshot values when either is unavailable
         unsafe_allow_html=True,
     )
     _econ_calendar = pd.DataFrame([
-        {"Date": "2026-09-09", "Release": "BOC Rate Decision",          "Detail": "market implied: hold at 2.25%"},
-        {"Date": "2026-09-11", "Release": "Canada CPI (Aug)",           "Detail": "expected 2.1% YoY"},
         {"Date": "2026-09-19", "Release": "Canada Retail Sales (Jul)",  "Detail": ""},
         {"Date": "2026-10-01", "Release": "Canada GDP (Q2 Final)",      "Detail": ""},
         {"Date": "2026-10-17", "Release": "Canada CPI (Sep)",           "Detail": ""},
-        {"Date": "2026-10-28", "Release": "BOC Rate Decision",          "Detail": ""},
+        {"Date": "2026-10-28", "Release": "BOC Rate Decision",          "Detail": "market implied: hold at 2.25%"},
         {"Date": "2026-10-30", "Release": "Canada GDP (Aug)",           "Detail": ""},
         {"Date": "2026-12-09", "Release": "BOC Rate Decision",          "Detail": ""},
+        {"Date": "2027-01-28", "Release": "BOC Rate Decision",          "Detail": ""},
     ])
 
     # Find the nearest upcoming event date (for bold/colored row highlight)
@@ -206,7 +206,8 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
               help="*From candlestick data — main markets table has no Canadian rows in snapshot")
 
     n_arb = len(arb_df) if not arb_df.empty else 0
-    k2.metric("ACTIVE CANADIAN ARB", f"{n_arb:,}")
+    k2.metric("ACTIVE CANADIAN ARB", f"{n_arb:,}",
+              help="Scanner detections for Canadian markets (ME/TH arbs + YNC feed artifacts; YNC not executable).")
 
     if _is_sqlite:
         _vol_label = f"{_can_cs_vol:,}" if _can_cs_vol > 0 else "--"
@@ -218,7 +219,8 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
     # Best opportunity
     if not arb_df.empty and "net_edge_cents" in arb_df.columns:
         best = arb_df["net_edge_cents"].max()
-        k4.metric("BEST ARB EDGE", f"+{float(best):.2f}c" if pd.notna(best) else "--")
+        k4.metric("BEST ARB EDGE", f"+{float(best):.2f}c" if pd.notna(best) else "--",
+                  help="Best net edge among live Canadian scanner detections (ME/TH or YNC; YNC feed artifacts are not executable).")
     else:
         k4.metric("BEST ARB EDGE", "--")
 
@@ -321,7 +323,7 @@ WHERE market_id LIKE 'KXCB%' OR market_id LIKE 'KXBOC%'
                 "SPREAD: bid-ask spread width (cents). "
                 "COMPL SPREAD: combined cost of owning YES + NO on the same contract "
                 "(YES ask + (1 − YES bid)); should be ≥ 1.00 — values below 1.00 indicate a "
-                "crossed/inverted market (potential riskless two-leg arb). "
+                "quotes below parity — likely a rounding/feed artifact (Kalshi YES/NO always sum ≥ $1.00). "
                 "AGE: time since last quote update from the WebSocket feed."
             )
         st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
@@ -941,30 +943,71 @@ color:{TEXT3};margin-left:0.75rem;'>NO ACTIVE MARKETS</span>
 def _render_historical_arb(hist_stats: dict):
     """Historical arb summary for Canadian markets."""
     if hist_stats.get("error") or hist_stats.get("total_opps", 0) == 0:
-        _health = get_system_health()
-        _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
-        if hist_stats.get("error"):
-            st.info("Historical arb scan data not yet available. Connect the data pipeline to populate Canadian market history.")
-        elif _is_sqlite:
-            st.markdown(
-                f"<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};"
-                f"padding:0.6rem 1rem;border-radius:3px;font-family:JetBrains Mono,monospace;"
-                f"font-size:0.72rem;color:{TEXT3};'>"
-                f"No Canadian arb opportunities in database. "
-                f"The current dataset covers general market strategies. "
-                f"Live Canadian arb scanning activates when the Synthesis WebSocket is connected.</div>",
-                unsafe_allow_html=True,
+        # Neon fallback: query live_arbs_cloud for Canadian ticker prefixes
+        _p08_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+        _p08_neon_rows = []
+        if _p08_neon_ok or True:  # always try Neon
+            try:
+                import dashboard.live_arb_store as _las_p08h
+                from sqlalchemy import text as _p08h_text
+                _p08h_eng = (
+                    getattr(_las_p08h, "_pg_engine", None)
+                    or _las_p08h.get_pg_engine_cached()
+                )
+                if _p08h_eng is not None:
+                    _CAN_LIKE = (
+                        "ticker LIKE 'KXBOC%' OR ticker LIKE 'KXCAD%' OR "
+                        "ticker LIKE 'KXCORR%' OR ticker LIKE 'KXCAHOUSEDEM%' OR "
+                        "ticker LIKE 'KXCBDECISIONCANADA%'"
+                    )
+                    with _p08h_eng.connect() as _p08h_c:
+                        _p08h_row = _p08h_c.execute(_p08h_text(
+                            f"SELECT COUNT(*), AVG(net_edge_cents), MAX(net_edge_cents), "
+                            f"string_agg(DISTINCT strategy_type, ', ') "
+                            f"FROM live_arbs_cloud WHERE ({_CAN_LIKE}) "
+                            f"AND strategy_type != 'collectively_exhaustive'"
+                        )).fetchone()
+                    if _p08h_row and _p08h_row[0]:
+                        _p08_neon_rows = [_p08h_row]
+            except Exception:
+                pass
+        if _p08_neon_rows:
+            _p08h_cnt = int(_p08_neon_rows[0][0])
+            _p08h_avg = float(_p08_neon_rows[0][1] or 0)
+            _p08h_max = float(_p08_neon_rows[0][2] or 0)
+            _p08h_strats = str(_p08_neon_rows[0][3] or "")
+            nh1, nh2, nh3, nh4 = st.columns(4)
+            nh1.metric("NEON ARBS (CA)", f"{_p08h_cnt:,}")
+            nh2.metric("AVG EDGE", f"{_p08h_avg:.2f}¢")
+            nh3.metric("BEST EDGE", f"{_p08h_max:.2f}¢")
+            nh4.metric("STRATEGIES", _p08h_strats[:30] if _p08h_strats else "--")
+            st.caption(
+                f"Canadian arb records from Neon cloud (KXBOC, KXCAD, KXCORR, KXCAHOUSEDEM prefixes) — "
+                f"analytics DB not connected on Streamlit Cloud"
             )
         else:
-            # Live mode, no opps yet
-            st.markdown(
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT3};"
-                f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-                f"No historical Canadian arb opportunities recorded yet.<br>"
-                f"<span style='font-size:0.65rem;'>Run the l2_scan_canadian scanner to detect opportunities.</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+            _health = get_system_health()
+            _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
+            if hist_stats.get("error"):
+                st.info("Historical arb scan data not yet available. Connect the data pipeline to populate Canadian market history.")
+            elif _is_sqlite:
+                st.markdown(
+                    f"<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};"
+                    f"padding:0.6rem 1rem;border-radius:3px;font-family:JetBrains Mono,monospace;"
+                    f"font-size:0.72rem;color:{TEXT3};'>"
+                    f"No Canadian arb opportunities in Neon cloud — scanner has not detected KXBOC/KXCAD arbs yet. "
+                    f"Live Canadian arb scanning activates when the Synthesis WebSocket is connected.</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT3};"
+                    f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
+                    f"No historical Canadian arb opportunities recorded yet.<br>"
+                    f"<span style='font-size:0.65rem;'>Run the l2_scan_canadian scanner to detect opportunities.</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
         return
 
     h1, h2, h3, h4 = st.columns(4)
@@ -1038,11 +1081,69 @@ ORDER BY total_vol DESC
 
 
 def _unavailable():
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;
-border-radius:3px;color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;'>
-Database unavailable. Connect a PostgreSQL or SQLite database to load Canadian market data.
+    # Try to show Neon Canadian arb stats before showing generic unavailable
+    try:
+        from dashboard.data_layer import get_canadian_historical_arb_stats
+        _ca_stats = get_canadian_historical_arb_stats()
+        _ca_total = _ca_stats.get("total_opps", 0) or _ca_stats.get("total_opportunities", 0)
+        if _ca_stats and _ca_total > 0:
+            from dashboard.styles import GREEN, TEXT2
+            st.markdown(
+                f"""<div style='background:{PANEL};border:1px solid {GREEN};border-left:3px solid {GREEN};
+padding:0.75rem 1rem;border-radius:3px;font-size:0.72rem;font-family:JetBrains Mono,monospace;
+color:{TEXT2};line-height:1.7;'>
+<span style='color:{GREEN};'>● NEON CLOUD</span> — Canadian market arbs logged<br>
+Total: <b>{_ca_total}</b> &nbsp;·&nbsp;
+Best edge: <b>{_ca_stats.get('max_edge_cents', 0):.2f}c</b> &nbsp;·&nbsp;
+Avg edge: <b>{_ca_stats.get('median_edge_cents', 0):.2f}c</b><br>
+<span style='font-size:0.62rem;'>Live market feed needed for real-time orderbook data.</span>
 </div>""",
-        unsafe_allow_html=True,
-    )
+                unsafe_allow_html=True,
+            )
+            return
+    except Exception:
+        pass
+    # Check Neon availability even if no Canadian arbs logged
+    _p08_neon_ok = False
+    _p08_neon_total = 0
+    try:
+        import dashboard.live_arb_store as _las_p08
+        _p08_neon_ok = (
+            bool(getattr(_las_p08, "_pg_ok", False))
+            or (getattr(_las_p08, "_pg_engine", None) is not None)
+        )
+        if _p08_neon_ok:
+            from sqlalchemy import text as _p08_text
+            _p08_eng = getattr(_las_p08, "_pg_engine", None) or _las_p08.get_pg_engine_cached()
+            if _p08_eng is not None:
+                with _p08_eng.connect() as _p08_c:
+                    _p08_r = _p08_c.execute(_p08_text(
+                        "SELECT COUNT(*) FROM live_arbs_cloud "
+                        "WHERE strategy_type != 'collectively_exhaustive'"
+                    )).fetchone()
+                _p08_neon_total = int(_p08_r[0]) if _p08_r else 0
+    except Exception:
+        pass
+    if not _p08_neon_ok:
+        _p08_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+    if _p08_neon_ok:
+        from dashboard.styles import AMBER as _A_P08, TEXT2 as _T2_P08
+        _neon_note = f" — {_p08_neon_total:,} total arbs in Neon" if _p08_neon_total > 0 else ""
+        st.markdown(
+            f"""<div style='background:{PANEL};border:1px solid {_A_P08};border-left:3px solid {_A_P08};
+padding:0.75rem 1rem;border-radius:3px;color:{_T2_P08};font-size:0.72rem;
+font-family:JetBrains Mono,monospace;line-height:1.6;'>
+▶ <b>Neon cloud connected{_neon_note}</b> — no Canadian-specific arbs detected yet.<br>
+<span style='font-size:0.62rem;'>Canadian arbs log when Kalshi BOC/CAD contracts trade and ME/TH conditions are met.</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;
+border-radius:3px;color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;'>
+Market data unavailable — live feed or PostgreSQL connection required for Canadian market orderbook.
+</div>""",
+            unsafe_allow_html=True,
+        )
 

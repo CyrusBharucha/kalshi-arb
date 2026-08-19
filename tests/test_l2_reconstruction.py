@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_l2_reconstruction.py
 ================================
 Unit tests for data/orderbook_l2.py — SideBook, L2Book, L2Cache, VWAP.

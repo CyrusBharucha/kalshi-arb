@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_lifecycle.py
 Tests for arbitrage/lifecycle.py — opportunity dedup, open/close logic,
 and depth-based qty calculation.

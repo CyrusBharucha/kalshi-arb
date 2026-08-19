@@ -122,7 +122,7 @@ def _action_label(strategy: str, ticker: str, title: str = "") -> str:
     n = int(m.group(1)) if m else ""
     _tn = f" — {title}" if title else ""
     if strategy == "yes_no_complement":
-        return f"Buy YES + NO on same market{_tn}"
+        return f"Feed artifact — YES+NO same market (not executable){_tn}"
     elif strategy == "collectively_exhaustive":
         return f"Buy YES on all {n} candidates{_tn}" if n else f"Buy YES on all candidates{_tn}"
     elif strategy == "mutually_exclusive":
@@ -157,17 +157,49 @@ HISTORICAL ARBITRAGE
         _sess_total = 0
 
     try:
-        from dashboard.live_arb_store import _get_pg_engine as _pg_check
-        _pg_live = _pg_check() is not None
+        import dashboard.live_arb_store as _las_p05
+        _pg_live = (
+            bool(getattr(_las_p05, "_pg_ok", False))
+            or (getattr(_las_p05, "_pg_engine", None) is not None)
+        )
+        if not _pg_live:
+            _pg_live = _las_p05.get_pg_engine_cached() is not None
     except Exception:
         _pg_live = False
+    # Fallback: sidebar already confirmed Neon via _get_pg_engine()
+    if not _pg_live:
+        _pg_live = bool(st.session_state.get("_sidebar_neon_ok", False))
 
-    _scanner_dot = f"<span style='color:#22C55E;'>●</span> {int(_mkts):,} markets" if _ws_connected else f"<span style='color:#6B7280;'>○</span> scanner offline"
-    _db_dot = f"<span style='color:#22C55E;'>Neon</span>" if _pg_live else f"<span style='color:{AMBER};'>SQLite</span>"
+    import os as _os_p05
+    _sk_p05 = _os_p05.environ.get("SYNTHESIS_SECRET_KEY", "").strip()
+    if not _sk_p05:
+        try:
+            _sk_p05 = (st.secrets.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+        except Exception:
+            pass
+    if not _sk_p05:
+        try:
+            for _ns_p05 in st.secrets.values():
+                if hasattr(_ns_p05, "get"):
+                    _sk_p05 = (_ns_p05.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+                    if _sk_p05:
+                        break
+        except Exception:
+            pass
+    _has_key_p05 = bool(_sk_p05)
+    if _ws_connected:
+        _scanner_dot = f"<span style='color:#22C55E;'>●</span> {int(_mkts):,} markets"
+    elif _pg_live:
+        _scanner_dot = f"<span style='color:#22C55E;'>●</span> cloud feed (Neon)"
+    elif _has_key_p05:
+        _scanner_dot = f"<span style='color:#F59E0B;'>◔</span> scanner starting…"
+    else:
+        _scanner_dot = f"<span style='color:#6B7280;'>○</span> scanner offline"
+    _db_dot = f"<span style='color:#22C55E;'>Neon</span>" if _pg_live else f"<span style='color:{AMBER};'>&#8635;&nbsp;Neon</span>"
     st.markdown(
         f"<div style='font-size:0.65rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
         f"margin-bottom:0.75rem;'>{_scanner_dot} &nbsp;·&nbsp; db: {_db_dot}"
-        f"{'&nbsp;·&nbsp; session: ' + str(_sess_total) + ' arbs' if _sess_total > 0 else ''}</div>",
+        f"{'&nbsp;·&nbsp; session: ' + str(_sess_total) + ' detections' if _sess_total > 0 else ''}</div>",
         unsafe_allow_html=True,
     )
 
@@ -271,10 +303,40 @@ HISTORICAL ARBITRAGE
         df = df[_date_mask]
 
     if _db_err:
-        st.caption(f"DB unavailable — set DATABASE_URL secret to load cloud history.")
+        st.caption(f"DB unavailable ({_db_err}) — verify DATABASE_URL secret is set in Streamlit Cloud.")
 
 
     if df.empty:
+        # --- Neon cloud hint when date range has no local rows ---
+        _neon_cloud_hint = ""
+        try:
+            import dashboard.live_arb_store as _las_p05e
+            from sqlalchemy import text as _p05e_text
+            _eng_p05e = getattr(_las_p05e, "_pg_engine", None) or _las_p05e.get_pg_engine_cached()
+            if _eng_p05e is not None:
+                with _eng_p05e.connect() as _c_p05e:
+                    _row_p05e = _c_p05e.execute(_p05e_text(
+                        "SELECT COUNT(*), MIN(detected_at)::date, MAX(detected_at)::date "
+                        "FROM live_arbs_cloud WHERE strategy_type != 'collectively_exhaustive'"
+                    )).fetchone()
+                if _row_p05e and _row_p05e[0]:
+                    _cnt_p05e = int(_row_p05e[0])
+                    _min_dt = str(_row_p05e[1])[:10] if _row_p05e[1] else "--"
+                    _max_dt = str(_row_p05e[2])[:10] if _row_p05e[2] else "--"
+                    _neon_cloud_hint = (
+                        f"<div style='margin-bottom:0.85rem;padding:0.5rem 0.85rem;"
+                        f"background:rgba(34,197,94,0.06);border:1px solid #22C55E44;"
+                        f"border-left:3px solid #22C55E;border-radius:3px;"
+                        f"font-size:0.7rem;font-family:JetBrains Mono,monospace;color:{TEXT2};line-height:1.7;'>"
+                        f"<span style='color:#22C55E;font-size:0.6rem;letter-spacing:0.1em;"
+                        f"text-transform:uppercase;'>NEON CLOUD — {_cnt_p05e} ME/TH ARBS ON RECORD</span><br>"
+                        f"Range: {_min_dt} → {_max_dt}. "
+                        f"<span style='color:{TEXT3};'>Widen the DATE RANGE filter above to see them.</span>"
+                        f"</div>"
+                    )
+        except Exception:
+            pass
+
         # --- Inline scanner status for empty state ---
         _scanner_html_badge = ""
         try:
@@ -294,7 +356,7 @@ HISTORICAL ARBITRAGE
                     f"MARKETS TRACKED: <b style='color:{TEXT};'>{int(_mkts_es):,}</b>"
                     f"&nbsp;&nbsp;MSG/S: <b style='color:{TEXT};'>{float(_rate_es):.1f}</b><br>"
                     f"<span style='color:{TEXT3};font-size:0.65rem;'>"
-                    f"Arbs should appear here within minutes if any exist on Kalshi right now."
+                    f"ME/TH arbs appear here within minutes of detection. YNC detections are feed artifacts."
                     f"</span></div>"
                 )
             else:
@@ -316,26 +378,26 @@ HISTORICAL ARBITRAGE
             f"<div style='background:{PANEL};border:1px solid {BORDER};"
             f"border-left:4px solid {BLUE};border-radius:4px;"
             f"padding:1.1rem 1.3rem 1rem 1.3rem;margin-top:0.25rem;'>"
+            f"{_neon_cloud_hint}"
             f"{_scanner_html_badge}"
             f"<div style='font-size:0.72rem;color:{TEXT2};font-family:Inter,sans-serif;"
             f"line-height:1.75;'>"
             f"<div style='font-size:0.62rem;letter-spacing:0.1em;text-transform:uppercase;"
-            f"color:{TEXT3};margin-bottom:0.6rem;'>NO ARBS IN DATABASE YET</div>"
-            f"The scanner writes arbs to the database as they are detected. "
-            f"With the scanner running, arbs should appear here within minutes "
-            f"if any exist on Kalshi right now.<br><br>"
-            f"<b style='color:{TEXT};font-size:0.68rem;letter-spacing:0.05em;'>TO START SEEING ARBS HERE:</b><br>"
+            f"color:{TEXT3};margin-bottom:0.6rem;'>NO DETECTIONS IN SELECTED DATE RANGE</div>"
+            f"The scanner writes detections to the database as they are found. "
+            f"With the scanner running, ME/TH arbs appear here within minutes of detection. "
+            f"YNC detections are feed artifacts (not actionable).<br><br>"
+            f"<b style='color:{TEXT};font-size:0.68rem;letter-spacing:0.05em;'>TO START SEEING DETECTIONS HERE:</b><br>"
             f"<span style='color:{CYAN};'>1.</span>&nbsp; Start the WebSocket scanner: "
             f"<code style='background:rgba(255,255,255,0.06);padding:0.1rem 0.35rem;"
             f"border-radius:2px;font-size:0.68rem;'>python ws_bridge.py</code> "
             f"(or the Streamlit Cloud background process)<br>"
             f"<span style='color:{CYAN};'>2.</span>&nbsp; The scanner checks all markets every second "
-            f"and writes any arb it finds to this database automatically.<br>"
-            f"<span style='color:{CYAN};'>3.</span>&nbsp; Arbs persist across restarts — once saved "
+            f"and writes any detection (ME/TH arbs + YNC feed artifacts) to this database automatically.<br>"
+            f"<span style='color:{CYAN};'>3.</span>&nbsp; Detections persist across restarts — once saved "
             f"they always appear here.<br><br>"
             f"<span style='color:{TEXT3};font-size:0.67rem;'>"
-            f"All five strategy types are scanned: YES/NO complement, collectively exhaustive, "
-            f"mutually exclusive, threshold order, and superset.</span>"
+            f"ME (mutually exclusive) and TH (threshold order) arbs are detected and persisted automatically. YNC records are feed artifacts (live YES+NO always ≥ $1.00 — not executable). CE scanning is currently disabled.</span>"
             f"</div></div>",
             unsafe_allow_html=True,
         )
@@ -377,7 +439,7 @@ HISTORICAL ARBITRAGE
 
     if n == 0:
         st.info(
-            "No arbs or historical research candidates found in the selected filters. "
+            "No detections or historical research candidates found in the selected filters. "
             "Try widening the date range or removing strategy/edge filters."
         )
         return
@@ -403,11 +465,14 @@ HISTORICAL ARBITRAGE
     _arbs_per_hour = n_today / _hours_elapsed
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("TODAY", f"{n_today:,}")
-    k2.metric("IN RANGE", f"{n:,}")
-    k3.metric("BEST EDGE", f"{_best_edge:.2f}c" if len(edges) > 0 else "--")
-    k4.metric("AVG EDGE", f"{_avg_edge_cents:.2f}c" if len(edges) > 0 else "--")
-    k5.metric("RATE", f"{_arbs_per_hour:.1f}/hr" if n_today > 0 else "--")
+    k1.metric("TODAY", f"{n_today:,}", help="Detections today (all strategies — ME/TH arbs + YNC feed artifacts; use strategy filter to isolate ME/TH)")
+    k2.metric("IN RANGE", f"{n:,}", help="Detections in selected date range (all strategies — ME/TH arbs + YNC feed artifacts; use strategy filter to isolate ME/TH)")
+    k3.metric("BEST EDGE", f"{_best_edge:.2f}c" if len(edges) > 0 else "--",
+              help="Best net edge in view (use strategy filter to exclude YNC feed artifacts)")
+    k4.metric("AVG EDGE", f"{_avg_edge_cents:.2f}c" if len(edges) > 0 else "--",
+              help="Mean net edge in view (use strategy filter to exclude YNC feed artifacts)")
+    k5.metric("RATE", f"{_arbs_per_hour:.1f}/hr" if n_today > 0 else "--",
+              help="Detections today divided by hours elapsed. Use strategy filter to isolate ME/TH actionable arbs (excludes YNC feed artifacts).")
 
     # --- Analytics expander (charts + breakdowns, collapsed by default) ---
     def _section_header_inner(t):
@@ -482,7 +547,7 @@ HISTORICAL ARBITRAGE
                         textposition="outside", cliponaxis=False,
                     ))
                     _perf_fig.update_layout(**plotly_dark_layout(
-                        title={"text": "AVG NET EDGE BY STRATEGY (¢)", "font": {"size": 10, "color": TEXT3}},
+                        title={"text": "AVG NET EDGE BY STRATEGY (¢) — YNC = feed artifact", "font": {"size": 10, "color": TEXT3}},
                         height=200, showlegend=False,
                         margin={"l": 30, "r": 30, "t": 35, "b": 30},
                         xaxis_title="", yaxis_title="Avg Net (¢)",
@@ -505,7 +570,7 @@ HISTORICAL ARBITRAGE
                     _mkt_fig.update_layout(**plotly_dark_layout(
                         height=200, showlegend=False,
                         margin={"l": 160, "r": 40, "t": 10, "b": 30},
-                        xaxis_title="Arb Count", yaxis={"automargin": True},
+                        xaxis_title="Arb Count (all strategies; use filter to exclude YNC feed artifacts)", yaxis={"automargin": True},
                     ))
                     st.plotly_chart(_mkt_fig, use_container_width=True)
         except Exception:
@@ -695,7 +760,7 @@ HISTORICAL ARBITRAGE
         else:
             _disp_out = _disp_out.sort_values(_sc, ascending=_asc, na_position="last")
     if "net_edge_cents" in df.columns and (pd.to_numeric(df["net_edge_cents"], errors="coerce") > 50).any():
-        st.caption("Some records show edge >50c — pre-fix scanner data. Current scanner caps CE gross at 25c.")
+        st.caption("Some records show edge >50c — pre-fix scanner data from before the Gate 1b stale-book fix. CE scanner is currently disabled.")
 
     # --- Total executed P&L metric ---
     _exec_col = next((c for c in df.columns if c in ("executed", "is_executed")), None)
@@ -750,12 +815,12 @@ HISTORICAL ARBITRAGE
                     _ss_hour_counts = _ss_ts.dt.hour.value_counts()
                     if not _ss_hour_counts.empty:
                         _ss_top_hr = int(_ss_hour_counts.idxmax())
-                        _ss_most_active_hour = f"{_ss_top_hr:02d}:00 ET ({_ss_hour_counts.iloc[0]} arbs)"
+                        _ss_most_active_hour = f"{_ss_top_hr:02d}:00 ET ({_ss_hour_counts.iloc[0]} detections)"
                 except Exception:
                     pass
             _ssc1, _ssc2, _ssc3 = st.columns(3)
             _ssc1.metric(
-                "Total Arbs" if not _has_ohlc else "Total (Arbs + Historical Signals)",
+                "Total Records" if not _has_ohlc else "Total (Records + Historical Signals)",
                 f"{_ss_total:,}",
             )
             _ssc2.metric("Avg Net Edge", f"{_ss_avg_net:.2f}c" if not pd.isna(_ss_avg_net) else "--")
@@ -765,7 +830,7 @@ HISTORICAL ARBITRAGE
                          help=_ss_best_ticker)
             _ssc5.metric("Most Active Hour", _ss_most_active_hour)
             if not pd.isna(_ss_best_edge):
-                st.caption(f"Best arb ticker: {_ss_best_ticker}")
+                st.caption(f"Best detection ticker: {_ss_best_ticker} — use strategy filter to exclude YNC feed artifacts and isolate ME/TH arbs")
 
     # --- Classification upgrade path note (shown when Class C or D arbs are present) ---
     if not _disp_out.empty and "CLASS" in _disp_out.columns:
@@ -789,7 +854,7 @@ HISTORICAL ARBITRAGE
     _detail_options = df["id"].tolist() if "id" in df.columns else df.index.tolist()
     if _detail_options:
         _sel = st.selectbox(
-            "Select arb to inspect",
+            "Select detection to inspect",
             options=_detail_options,
             key="p05_detail_select",
         )
@@ -927,14 +992,14 @@ HISTORICAL ARBITRAGE
 
                 _dd_sim_col, _dd_freq_col = st.columns(2)
                 _dd_sim_col.metric(
-                    "SIMILAR ARBS (±24h, same ticker)",
+                    "SIMILAR DETECTIONS (±24h, same ticker)",
                     f"{_similar_count:,}" if _similar_count is not None else "—",
-                    help="Arbs with same ticker within 24h of this arb",
+                    help="Detections with same ticker within 24h (all strategies — ME/TH arbs + YNC feed artifacts)",
                 )
                 _dd_freq_col.metric(
                     "TICKER FREQUENCY (all-time)",
                     f"{_ticker_freq:,}" if _ticker_freq is not None else "—",
-                    help="Total times this ticker has appeared in arb history",
+                    help="Total times this ticker has appeared in detection history (all strategies — ME/TH arbs + YNC feed artifacts)",
                 )
 
                 # Copy arb details
@@ -959,7 +1024,7 @@ HISTORICAL ARBITRAGE
                     _copy_lines.append(f"Freq (DB):  {_ticker_freq} total · {_similar_count} within ±24h")
                 st.markdown(
                     f"<div style='font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;"
-                    f"color:{TEXT3};margin:0.5rem 0 2px 0;'>Copy arb details</div>",
+                    f"color:{TEXT3};margin:0.5rem 0 2px 0;'>Copy detection details</div>",
                     unsafe_allow_html=True,
                 )
                 st.code("\n".join(_copy_lines), language=None)
@@ -1053,7 +1118,7 @@ HISTORICAL ARBITRAGE
                     .isin(_lead_strat_filter)
                 ]
 
-            _section_header("TROPHY TOP ARBS LEADERBOARD")
+            _section_header("TOP DETECTIONS LEADERBOARD (use filter above to exclude YNC feed artifacts)")
             if not _lead_src.empty:
                 _lead_src = _lead_src.copy()
                 _lead_src["_net_num"] = pd.to_numeric(_lead_src["net_edge_cents"], errors="coerce")
@@ -1158,11 +1223,11 @@ HISTORICAL ARBITRAGE
                             _med_gap_str = f"{_med_gap_sec / 3600:.1f}h"
                         else:
                             _med_gap_str = f"{_med_gap_sec / 86400:.1f}d"
-                        st.caption(f"Median time between top arbs: {_med_gap_str}")
+                        st.caption(f"Median time between top records: {_med_gap_str}")
                 except Exception:
                     pass
             else:
-                st.info("No confirmed arbs in dataset yet")
+                st.info("No records in dataset yet (use strategy filter to isolate ME/TH arbs)")
     except Exception:
         pass
 
@@ -1180,7 +1245,7 @@ HISTORICAL ARBITRAGE
     _dl_label_suffix = (
         f"{_n_live:,} live detections + {_n_ohlc:,} historical signals"
         if _has_ohlc and _n_live > 0
-        else (f"{_n_ohlc:,} historical research candidates" if _has_ohlc else f"{len(_export_df):,} arbs")
+        else (f"{_n_ohlc:,} historical research candidates" if _has_ohlc else f"{len(_export_df):,} detections (ME/TH arbs + YNC feed artifacts)")
     )
     st.download_button(
         label=f"⬇ Download CSV — {_dl_label_suffix} ({_date_from.strftime('%b %d')} – {_date_to.strftime('%b %d, %Y')})",

@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/boc_panel.py
 ======================
 Shared Bank of Canada live-data panel + policy-meeting countdown.
@@ -30,7 +30,7 @@ from dashboard.styles import PANEL, PANEL2, BORDER, TEXT, TEXT2, TEXT3, GREEN, R
 BOC_MEETING_DATES: List[date] = [
     date(2026, 1, 28),   # actual
     date(2026, 3, 11),   # actual
-    date(2026, 4, 16),   # actual (rate cut to 2.00%)
+    date(2026, 4, 16),   # actual (hold at 2.25%)
     date(2026, 6, 4),    # actual
     date(2026, 7, 30),   # actual
     date(2026, 9, 9),

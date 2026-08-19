@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_full_backtest_loaders.py
 =====================================
 Unit tests for backtest/full_backtest:

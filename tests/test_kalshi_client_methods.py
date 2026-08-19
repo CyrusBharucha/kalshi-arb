@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_kalshi_client_methods.py
 =====================================
 Unit tests for data/kalshi_client.KalshiClient public API methods.

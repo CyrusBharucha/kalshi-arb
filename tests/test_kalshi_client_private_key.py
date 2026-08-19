@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_kalshi_client_private_key.py
 ==========================================
 Unit tests for data/kalshi_client.py _load_private_key():

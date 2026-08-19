@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_price_cache.py
 ================================
 Unit tests for data/websocket_client.py LivePriceCache class.

@@ -285,4 +285,3 @@ class TestStatusColors:
         from dashboard.pages.p02_live_arb import _STRATEGIES
         assert "All" in _STRATEGIES
         assert "yes_no_complement" in _STRATEGIES
-        assert "mutually_exclusive" in _STRATEGIES

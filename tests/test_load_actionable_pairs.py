@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_load_actionable_pairs.py
 ======================================
 Unit tests for analysis/run_empirical.load_actionable_pairs().

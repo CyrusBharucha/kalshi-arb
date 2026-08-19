@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/yes_no.py
 Strategy 1: YES/NO Complement Arbitrage
 

@@ -1,4 +1,4 @@
-"""dashboard/pages/p11_market_types.py -- Gate 0 Market Type Classifications"""
+﻿"""dashboard/pages/p11_market_types.py -- Gate 0 Market Type Classifications"""
 from __future__ import annotations
 
 import streamlit as st
@@ -15,25 +15,43 @@ BLUE  = "#3b82f6"
 TEXT3 = "#64748b"
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def _load_classifications() -> pd.DataFrame:
+    _query = """
+        SELECT series_prefix, market_type, ce_eligible, me_eligible,
+               status, auto_reason, title_example, market_count,
+               classified_by, first_seen_at, last_seen_at
+        FROM event_series_classifications
+        ORDER BY last_seen_at DESC
+    """
+    # Try primary analytics engine first
     try:
-        from dashboard.db import get_db_conn
-        conn = get_db_conn()
-        if conn is None:
-            return pd.DataFrame()
-        with conn.cursor() as c:
-            c.execute("""
-                SELECT series_prefix, market_type, ce_eligible, me_eligible,
-                       status, auto_reason, title_example, market_count,
-                       classified_by, first_seen_at, last_seen_at
-                FROM event_series_classifications
-                ORDER BY last_seen_at DESC
-            """)
-            cols = [d[0] for d in c.description]
-            return pd.DataFrame(c.fetchall(), columns=cols)
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text(_query))
+            rows = result.fetchall()
+            cols = list(result.keys())
+        if rows:
+            return pd.DataFrame(rows, columns=cols)
     except Exception:
-        return pd.DataFrame()
+        pass
+    # Fallback: try Neon via live_arb_store connection (same DATABASE_URL)
+    try:
+        import dashboard.live_arb_store as _las_p11a
+        from sqlalchemy import text as _text
+        _engine = getattr(_las_p11a, "_pg_engine", None) or _las_p11a.get_pg_engine_cached()
+        if _engine is not None:
+            with _engine.connect() as _conn:
+                _result = _conn.execute(_text(_query))
+                _rows = _result.fetchall()
+                _cols = list(_result.keys())
+            if _rows:
+                return pd.DataFrame(_rows, columns=_cols)
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 
 def _ce_dot(v: bool) -> str:
@@ -82,7 +100,48 @@ def render():
     df = _load_classifications()
 
     if df.empty:
-        st.warning("Classification table unavailable — check DB connection.")
+        st.info(
+            "Market type classifications not yet populated. "
+            "Run `scripts/classify_event_series.py` to seed the table. "
+            "The arb scanner (Gate 0) blocks unknown series until classified."
+        )
+        # Show arb-detected series prefixes from Neon as a proxy
+        try:
+            import dashboard.live_arb_store as _las_p11b
+            from sqlalchemy import text as _p11_text
+            _eng_p11 = (
+                getattr(_las_p11b, "_pg_engine", None)
+                or _las_p11b.get_pg_engine_cached()
+            )
+            if _eng_p11 is not None:
+                with _eng_p11.connect() as _c_p11:
+                    _rows_p11 = _c_p11.execute(_p11_text(
+                        "SELECT SPLIT_PART(ticker, '-', 1) AS prefix, "
+                        "COUNT(*) AS arb_count, "
+                        "AVG(net_edge_cents) AS avg_edge, "
+                        "MAX(net_edge_cents) AS best_edge, "
+                        "string_agg(DISTINCT strategy_type, ', ') AS strategies "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type != 'collectively_exhaustive' "
+                        "GROUP BY 1 ORDER BY arb_count DESC"
+                    )).fetchall()
+                if _rows_p11:
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                        f"color:{TEXT3};margin:0.75rem 0 0.4rem;'>ARB-DETECTED SERIES (NEON CLOUD)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    import pandas as _pd_p11
+                    _df_p11 = _pd_p11.DataFrame(
+                        _rows_p11,
+                        columns=["Series Prefix", "Arb Count", "Avg Edge", "Best Edge", "Strategies"]
+                    )
+                    _df_p11["Avg Edge"] = _df_p11["Avg Edge"].apply(lambda v: f"{float(v):.2f}¢" if v else "--")
+                    _df_p11["Best Edge"] = _df_p11["Best Edge"].apply(lambda v: f"{float(v):.2f}¢" if v else "--")
+                    st.dataframe(_df_p11, use_container_width=True, hide_index=True)
+                    st.caption(f"{len(_rows_p11)} unique series prefixes detected across {sum(r[1] for r in _rows_p11)} Neon arbs")
+        except Exception:
+            pass
         return
 
     total     = len(df)
@@ -200,3 +259,4 @@ def render():
         .sort_values("count", ascending=False)
     )
     st.dataframe(breakdown, use_container_width=True, hide_index=True)
+

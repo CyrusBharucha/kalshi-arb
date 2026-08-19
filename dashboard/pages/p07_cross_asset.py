@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/pages/p07_cross_asset.py — Cross-Asset Analysis
 
 Sections:
@@ -365,7 +365,7 @@ def _render_ce_sum_check(rate_live: dict) -> None:
     for meeting, mids in sorted(groups.items()):
         total = sum(mids)
         dev = total - 1.0
-        flag = "CE ARB" if total < 0.98 else ("OVER" if total > 1.02 else "OK")
+        flag = "BELOW PARITY" if total < 0.98 else ("OVER" if total > 1.02 else "OK")
         rows.append({"MEETING": meeting, "OUTCOMES": len(mids),
                      "SUM OF MIDS ($)": f"{total:.3f}",
                      "DEV FROM $1": f"{dev*100:+.1f}c", "STATUS": flag})
@@ -382,7 +382,8 @@ def _render_ce_sum_check(rate_live: dict) -> None:
     st.dataframe(_df_ce, use_container_width=True, hide_index=True,
                  height=min(160, len(_df_ce) * 38 + 42))
     st.caption("CE markets: YES mids for all rate outcomes at the same meeting should sum to ~$1. "
-               "< $0.98 = potential buy-all-YES arb. > $1.02 = book over-priced.")
+               "< $0.98 = theoretical buy-all-YES edge (CE scanner currently disabled — not auto-detected). "
+               "> $1.02 = book over-priced.")
 
 
 def _render_yes_no_complement_spread(live_state) -> None:
@@ -390,7 +391,7 @@ def _render_yes_no_complement_spread(live_state) -> None:
     For every live market with a valid two-sided quote, compute the implied
     YES + NO round-trip cost (yes_ask + no_ask_implied = yes_ask + 1 - yes_bid).
     Should be > 1.0 (bid-ask spread > 0). Values < 1.0 indicate a crossed/inverted
-    market — a riskless two-leg arb on the SAME contract. Displays top 20 by lowest
+    market — a feed/rounding artifact (Kalshi YES/NO always sum ≥ $1.00 live; not executable). Displays top 20 by lowest
     combined ask and flags any crossings.
     """
     try:
@@ -423,7 +424,7 @@ def _render_yes_no_complement_spread(live_state) -> None:
         f"<div style='font-size:0.62rem;letter-spacing:0.08em;color:{_hdr_color};"
         f"text-transform:uppercase;margin-bottom:4px;'>"
         f"{'🔴 ' if _flagged else ''}LIVE YES/NO COMPLEMENT SPREAD — "
-        f"{len(rows)} markets · {_flagged} crossed (arb)</div>",
+        f"{len(rows)} markets · {_flagged} below parity (feed artifact)</div>",
         unsafe_allow_html=True,
     )
     st.dataframe(_df, use_container_width=True, hide_index=True,
@@ -433,7 +434,8 @@ def _render_yes_no_complement_spread(live_state) -> None:
         "YES ASK: cost to buy YES (cents). "
         "NO ASK (impl): implied cost to buy NO = 1 − YES bid (cents). "
         "COMBINED: YES ask + NO ask (impl); should be ≥ 100c since both legs together must resolve to $1. "
-        "EXCESS: combined − 100c; negative = crossed market (riskless two-leg arb on the same contract). "
+        "EXCESS: combined − 100c; negative = quotes below parity — likely a rounding/feed artifact "
+        "(Kalshi YES/NO are always complements; live round-trip cost is always ≥ $1.00). "
         "Sorted by lowest COMBINED (cheapest round-trip). Top 20 markets shown."
     )
 
@@ -455,6 +457,75 @@ different venues under different rules and cannot be locked against each other.
     _h = _gh()
     _is_sqlite_p07 = not _h.get("db_connected", False) and _h.get("db_mode") == "sqlite"
 
+    # --- Neon BOC/FED arb history (shown when WS scanner offline) -----
+    _p07_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+    if not _p07_neon_ok:
+        try:
+            import dashboard.live_arb_store as _las_p07
+            _p07_neon_ok = (
+                bool(getattr(_las_p07, "_pg_ok", False))
+                or (getattr(_las_p07, "_pg_engine", None) is not None)
+            )
+            if not _p07_neon_ok:
+                _p07_neon_ok = _las_p07.get_pg_engine_cached() is not None
+        except Exception:
+            pass
+    try:
+        from dashboard.live_state import get_live_state as _gls_p07chk
+        _ws_p07_online = _gls_p07chk().get_stats().get("connected", False)
+    except Exception:
+        _ws_p07_online = False
+    if not _ws_p07_online and _p07_neon_ok:
+        try:
+            import dashboard.live_arb_store as _las_p07n
+            from sqlalchemy import text as _p07_text
+            _p07_eng = getattr(_las_p07n, "_pg_engine", None) or _las_p07n.get_pg_engine_cached()
+            if _p07_eng is not None:
+                with _p07_eng.connect() as _p07_c:
+                    _p07_boc_rows = _p07_c.execute(_p07_text(
+                        "SELECT ticker, strategy_type, net_edge_cents, detected_at "
+                        "FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXFED%' OR ticker LIKE 'KXCB%' "
+                        "       OR ticker LIKE 'KXCAD%' OR ticker LIKE 'KXCORR%') "
+                        "AND strategy_type NOT IN ('yes_no_complement','collectively_exhaustive') "
+                        "AND net_edge_cents > 0 "
+                        "ORDER BY detected_at DESC LIMIT 12"
+                    )).fetchall()
+                    _p07_total = _p07_c.execute(_p07_text(
+                        "SELECT COUNT(*), MAX(net_edge_cents) FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXFED%' OR ticker LIKE 'KXCB%' "
+                        "       OR ticker LIKE 'KXCAD%' OR ticker LIKE 'KXCORR%') "
+                        "AND strategy_type NOT IN ('yes_no_complement','collectively_exhaustive') "
+                        "AND net_edge_cents > 0"
+                    )).fetchone()
+                if _p07_boc_rows:
+                    _p07_cnt = int(_p07_total[0]) if _p07_total else len(_p07_boc_rows)
+                    _p07_best = float(_p07_total[1] or 0) if _p07_total else 0.0
+                    st.markdown(
+                        f"<div style='margin-bottom:0.85rem;padding:0.5rem 0.85rem;"
+                        f"background:rgba(34,197,94,0.06);border:1px solid #22C55E44;"
+                        f"border-left:3px solid #22C55E;border-radius:3px;"
+                        f"font-size:0.7rem;font-family:JetBrains Mono,monospace;color:#94A3B8;line-height:1.7;'>"
+                        f"<span style='color:#22C55E;font-size:0.6rem;letter-spacing:0.1em;"
+                        f"text-transform:uppercase;'>● NEON CLOUD — BOC/FED RATE ARBS "
+                        f"({_p07_cnt} total · best {_p07_best:.2f}¢)</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    import pandas as _pd_p07n
+                    _p07_df = _pd_p07n.DataFrame(
+                        _p07_boc_rows, columns=["Ticker", "Strategy", "Net Edge (¢)", "Detected At"]
+                    )
+                    _p07_df["Net Edge (¢)"] = _p07_df["Net Edge (¢)"].apply(
+                        lambda v: f"{float(v):.2f}¢" if v is not None else "--"
+                    )
+                    _p07_df["Detected At"] = _pd_p07n.to_datetime(
+                        _p07_df["Detected At"], utc=True, errors="coerce"
+                    ).dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d %H:%M ET")
+                    st.dataframe(_p07_df, use_container_width=True, hide_index=True,
+                                 height=min(380, len(_p07_df) * 38 + 42))
+        except Exception:
+            pass
 
     # --- Latest external market prices (yfinance + BOC VALET) -----
     _ext_prices = get_latest_external_prices()
@@ -869,7 +940,21 @@ Scanned {_scan_date}{f" — ⚠ {_age_days}d stale. Signals are for reference; m
             except Exception:
                 pass
         _corra_note = f" (live CORRA: {_fb_corra}%)" if _fb_corra else ""
-        _db_note = "Neon PostgreSQL connected" if not _is_sqlite_p07 else "local SQLite"
+        # Check Neon for a better db note
+        _p07_neon_ok = False
+        try:
+            import dashboard.live_arb_store as _las_p07
+            _p07_neon_ok = (
+                bool(getattr(_las_p07, "_pg_ok", False))
+                or (getattr(_las_p07, "_pg_engine", None) is not None)
+            )
+            if not _p07_neon_ok:
+                _p07_neon_ok = _las_p07.get_pg_engine_cached() is not None
+        except Exception:
+            pass
+        if not _p07_neon_ok:
+            _p07_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+        _db_note = "Neon cloud connected" if _p07_neon_ok else "Neon connecting…"
         st.markdown(
             f"""<div style='background:{PANEL};border:1px solid {AMBER};border-left:4px solid {AMBER};
 padding:0.75rem 1rem;border-radius:3px;margin-bottom:0.75rem;'>
@@ -959,7 +1044,37 @@ The live signals panel above and the calculators below work without this table{_
             else:
                 st.caption(f"No hourly candles found for {_sel_boc}. Ensure the candlestick pipeline has run for this market.")
         else:
-            st.caption("No KXCB%/KXFED% markets found in candlestick database.")
+            st.caption("No KXCB%/KXFED% markets found in candlestick database. Run the candlestick pipeline locally to populate price history.")
+            # Show BOC/FED tickers from Neon arb history as reference
+            try:
+                import dashboard.live_arb_store as _las_p07boc
+                from sqlalchemy import text as _boc_text
+                _boc_eng = getattr(_las_p07boc, "_pg_engine", None) or _las_p07boc.get_pg_engine_cached()
+                if _boc_eng is not None:
+                    with _boc_eng.connect() as _boc_c:
+                        _boc_neon = _boc_c.execute(_boc_text(
+                            "SELECT ticker, MAX(detected_at) AS last_seen, MAX(net_edge_cents) AS best_edge "
+                            "FROM live_arbs_cloud "
+                            "WHERE (ticker LIKE 'KXCB%' OR ticker LIKE 'KXFED%') "
+                            "  AND strategy_type != 'collectively_exhaustive' "
+                            "GROUP BY ticker ORDER BY last_seen DESC LIMIT 8"
+                        )).fetchall()
+                    if _boc_neon:
+                        import pandas as _pd_boc
+                        _boc_neon_df = _pd_boc.DataFrame(
+                            _boc_neon, columns=["ticker", "last_seen", "best_edge_c"]
+                        )
+                        _boc_neon_df["last_seen"] = _boc_neon_df["last_seen"].apply(lambda v: str(v)[:10] if v else "--")
+                        _boc_neon_df["best_edge_c"] = _boc_neon_df["best_edge_c"].apply(lambda v: f"{float(v):.2f}c" if v else "--")
+                        st.markdown(
+                            f"<div style='font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;"
+                            f"color:#64748b;margin:0.5rem 0 0.3rem;'>NEON — BOC/FED TICKERS WITH DETECTED ARBS</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.dataframe(_boc_neon_df, use_container_width=True, hide_index=True)
+                        st.caption("Enter a ticker above to compare it against CORRA, OIS rates, or other traditional assets.")
+            except Exception:
+                pass
 
     # --- Live BOC reference data -----
     render_boc_panel(show_countdown=True)
@@ -1169,7 +1284,7 @@ probability_engine math functions directly.
             st.info("MEDIUM volatility regime · Kalshi options fairly priced")
         else:
             st.warning("HIGH volatility regime · Kalshi options elevated premium")
-        st.caption("VIX regime affects option pricing models and arb opportunity frequency")
+        st.caption("VIX regime affects option pricing models and ME/TH scanner opportunity frequency")
         st.markdown("<br>", unsafe_allow_html=True)
         # ---- END VIX REGIME SECTION ----
 

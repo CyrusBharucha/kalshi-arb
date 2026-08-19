@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_external_data_extended.py
 =====================================
 Extended unit tests for data/external_market_data.py.

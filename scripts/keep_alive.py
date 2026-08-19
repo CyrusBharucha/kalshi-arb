@@ -33,7 +33,7 @@ PAGE_LOAD_TIMEOUT  = 90_000
 INITIAL_SECONDS    = 20
 BOOT_SECONDS       = 240
 RELOAD_SECONDS     = 120
-SESSION_HOLD_MS    = 30_000   # hold WS open so Streamlit counts the session
+SESSION_HOLD_MS    = 75_000   # hold WS open so Streamlit counts the session
 
 
 def _find_in_frames(page, selector):

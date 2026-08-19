@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_build_targeted_ohlc.py
 ====================================
 Unit tests for analysis/run_empirical.py build_targeted_ohlc().

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_targeted_candle_functions.py
 =========================================
 Unit tests for analysis/targeted_candle_pull:

@@ -1,4 +1,7 @@
-# Last updated: 2026-09-03 — force Streamlit Cloud redeploy
+# Last updated: 2026-09-12 — force Streamlit Cloud redeploy v2
+[client]
+showSidebarNavigation = false
+
 [server]
 headless = true
 enableCORS = false

@@ -1,4 +1,4 @@
-﻿"""
+"""
 data/synthesis_live.py
 ======================
 Synthesis API -> Kalshi live orderbook WebSocket client.

@@ -44,7 +44,7 @@ def fetch_synthesis_markets(
     Return (tickers, event_groups) from Synthesis REST API.
 
     tickers      — flat list of all Kalshi market tickers for WS subscription
-    event_groups — {event_id: [ticker, ...]} for ME / CE / threshold scanning
+    event_groups — {event_id: [ticker, ...]} for ME / TH scanning (CE disabled)
 
     Caches result to data/synthesis_markets_cache.json; uses cache if fresh.
     Falls back to empty event_groups on any error.

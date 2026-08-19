@@ -1,4 +1,4 @@
-"""dashboard/pages/p06_backtest.py --  Strategy Backtesting"""
+﻿"""dashboard/pages/p06_backtest.py --  Strategy Backtesting"""
 from __future__ import annotations
 import subprocess
 import sys
@@ -34,16 +34,99 @@ STRATEGY BACKTEST
     from dashboard.data_layer import get_system_health as _gh_bt
     _h_bt = _gh_bt()
     _is_sqlite_bt = not _h_bt.get("db_connected", False) and _h_bt.get("db_mode") == "sqlite"
+    # Suppress SQLite banner if sidebar already confirmed Neon is reachable
+    if _is_sqlite_bt and bool(st.session_state.get("_sidebar_neon_ok", False)):
+        _is_sqlite_bt = False
     if _is_sqlite_bt:
-        from dashboard.styles import AMBER as _A_BT, PANEL as _P_BT, BORDER as _B_BT, TEXT2 as _T2_BT
+        from dashboard.styles import AMBER as _A_BT, PANEL as _P_BT, BORDER as _B_BT, TEXT2 as _T2_BT, GREEN as _G_BT
+        # Check if Neon has arb history we can surface
+        _bt_neon_count = 0
+        try:
+            import dashboard.live_arb_store as _las_bt
+            from sqlalchemy import text as _bt_text
+            _bt_eng = getattr(_las_bt, "_pg_engine", None) or _las_bt.get_pg_engine_cached()
+            if _bt_eng is not None:
+                with _bt_eng.connect() as _bt_c:
+                    _bt_row = _bt_c.execute(_bt_text(
+                        "SELECT COUNT(*) FROM live_arbs_cloud WHERE strategy_type != 'collectively_exhaustive'"
+                    )).fetchone()
+                _bt_neon_count = int(_bt_row[0]) if _bt_row else 0
+        except Exception:
+            pass
+        _neon_note = (
+            f" &nbsp;<span style='color:{_G_BT};'>● {_bt_neon_count} arbs in Neon cloud</span> — "
+            f"see Research page for historical analysis."
+        ) if _bt_neon_count > 0 else ""
         st.markdown(
             f"<div style='background:{_P_BT};border:1px solid {_A_BT};border-left:4px solid {_A_BT};"
             f"padding:0.75rem 1rem;border-radius:3px;margin-bottom:1rem;font-size:0.72rem;"
             f"color:{_T2_BT};font-family:JetBrains Mono,monospace;line-height:1.6;'>"
             f"▶ RUN BACKTEST requires a direct PostgreSQL connection. "
-            f"Launch the backtest runner from the Kalshi Arb desktop application.</div>",
+            f"Launch the backtest runner from the Kalshi Arb desktop application.{_neon_note}</div>",
             unsafe_allow_html=True,
         )
+        # Neon edge distribution summary (shown instead of backtest results when no local DB)
+        if _bt_neon_count > 0:
+            try:
+                from sqlalchemy import text as _bt_sql
+                with _bt_eng.connect() as _bt_ec:
+                    _bt_strat_rows = _bt_ec.execute(_bt_sql(
+                        "SELECT strategy_type, COUNT(*) AS n, "
+                        "AVG(net_edge_cents) AS avg_edge, MAX(net_edge_cents) AS best_edge, "
+                        "MIN(net_edge_cents) AS min_edge "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('collectively_exhaustive','yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "GROUP BY strategy_type ORDER BY n DESC"
+                    )).fetchall()
+                    _bt_30d = _bt_ec.execute(_bt_sql(
+                        "SELECT DATE(detected_at AT TIME ZONE 'UTC')::text AS d, COUNT(*) AS n "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('collectively_exhaustive','yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "AND detected_at >= NOW() - INTERVAL '30 days' "
+                        "GROUP BY 1 ORDER BY 1"
+                    )).fetchall()
+                if _bt_strat_rows:
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                        f"color:#22C55E;font-family:Inter,sans-serif;margin:0.75rem 0 0.35rem;'>"
+                        f"● NEON CLOUD — ARB EDGE SUMMARY (ME/TH strategies)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _bt_cols = st.columns(len(_bt_strat_rows))
+                    for _bi, _br in enumerate(_bt_strat_rows):
+                        _bn, _bavg, _bbest = int(_br[1]), float(_br[2] or 0), float(_br[3] or 0)
+                        with _bt_cols[_bi]:
+                            st.metric(
+                                str(_br[0]).replace("_", " ").upper(),
+                                f"{_bn:,} arbs",
+                                help=f"avg {_bavg:.2f}¢ · best {_bbest:.2f}¢",
+                            )
+                            st.caption(f"avg {_bavg:.2f}¢ · best {_bbest:.2f}¢")
+                if _bt_30d:
+                    import pandas as _pd_bt30
+                    _bt30_df = _pd_bt30.DataFrame(_bt_30d, columns=["date", "count"])
+                    _bt30_fig = go.Figure(go.Bar(
+                        x=_bt30_df["date"], y=_bt30_df["count"],
+                        marker_color="#22C55E", marker_line_width=0,
+                    ))
+                    _bt30_fig.update_layout(**plotly_dark_layout(
+                        height=130,
+                        margin={"l": 30, "r": 10, "t": 10, "b": 30},
+                        xaxis={"tickformat": "%b %d", "tickfont": {"size": 8, "family": "JetBrains Mono"}, "showgrid": False},
+                        yaxis={"tickfont": {"size": 8, "family": "JetBrains Mono"}, "showgrid": False, "zeroline": False},
+                        showlegend=False,
+                    ))
+                    st.markdown(
+                        f"<div style='font-size:0.58rem;letter-spacing:0.08em;text-transform:uppercase;"
+                        f"color:#64748B;font-family:Inter,sans-serif;margin-top:0.5rem;margin-bottom:0.2rem;'>"
+                        f"30-DAY NEON DETECTION RATE (ME/TH only)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(_bt30_fig, use_container_width=True)
+            except Exception:
+                pass
 
     # --- Parameters -----
     with st.expander("BACKTEST PARAMETERS", expanded=False):
@@ -63,7 +146,7 @@ STRATEGY BACKTEST
             strategy_sel = st.selectbox(
                 "STRATEGY",
                 ["yes_no_complement"],
-                help="yes_no_complement — YES+NO must sum to 100¢; deviation = riskless arb",
+                help="yes_no_complement — YES+NO complement arb (historical research only; Kalshi YES/NO are always complements so live YNC sum ≥ $1.00 always)",
             )
             init_capital = st.number_input("INITIAL CAPITAL ($)", value=10000, step=1000)
         with pc3:
@@ -126,10 +209,10 @@ padding:1.25rem 1.5rem;border-radius:3px;margin-bottom:1rem;'>
 NO BACKTEST RUNS YET
 </div>
 <div style='font-size:0.72rem;color:{TEXT2};line-height:1.8;'>
-No backtest runs found. Connect a local PostgreSQL database and run the historical scan pipeline to populate backtest results. Use the RUN BACKTEST button above once the database is configured.
+No backtest runs found. The historical scan pipeline has not run yet — deploy and execute the pipeline to populate this table. Use the RUN BACKTEST button above to trigger a scan once the pipeline is running.
 </div>
 <div style='font-size:0.65rem;color:{TEXT3};margin-top:0.75rem;'>
-Data available: historical arb records from the database. Adjust the date range to load them.
+Data available: historical detection records from the database (ME/TH arbs + YNC feed artifacts). Adjust the date range to load them.
 </div>
 </div>""",
             unsafe_allow_html=True,
@@ -140,11 +223,7 @@ Data available: historical arb records from the database. Adjust the date range 
         st.markdown("<hr>", unsafe_allow_html=True)
         st.markdown("#### STRATEGY METHODOLOGY")
         for strat, desc in [
-            ("mutually_exclusive",      "Sum of NO asks < N−1 across N exclusive outcomes → buy all NOs; N−1 pay out"),
-            ("superset",               "Superset contract must price ≥ subset; violations are arb"),
-            ("threshold_order",        "Ordered thresholds enforce monotonicity; violations create spread arb"),
-            ("collectively_exhaustive", "Sum of YES asks < 100c → buy all outcomes for guaranteed profit"),
-            ("yes_no_complement",      "YES + NO of same contract must sum to 100c; any deviation is riskless two-leg arb"),
+            ("yes_no_complement", "YES + NO of the same contract structurally sum to ≥ $1.00 on Kalshi (NO ask = 1 − YES bid). Any historical record showing sum < $1.00 is a feed/rounding artifact — not an executable arb. YNC records here are historical scanner data only."),
         ]:
             st.markdown(
                 f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;
@@ -377,7 +456,7 @@ text-transform:uppercase;margin-bottom:3px;'>
     # --- Rolling Sharpe ratio chart (real trade P&L from DB) -----
     _n_real = len(pnl_series)
     if _n_real < 20:
-        st.info(f"Need 20+ logged arbs for rolling Sharpe — {_n_real} logged so far")
+        st.info(f"Need 20+ logged ME/TH arbs for rolling Sharpe — {_n_real} logged so far")
     else:
         _roll_mean = pnl_series.rolling(20).mean()
         _roll_std  = pnl_series.rolling(20).std()
@@ -471,7 +550,7 @@ text-transform:uppercase;margin-bottom:3px;'>
         st.plotly_chart(fig4, use_container_width=True)
 
     # --- Kelly Criterion (Live Arb Data) -----
-    with st.expander("📊 Kelly Criterion — Live Arb Sizing", expanded=False):
+    with st.expander("📊 Kelly Criterion — ME/TH Arb Sizing (YNC excluded)", expanded=False):
         # --- Configurable bankroll input -----
         _bankroll_input = st.number_input(
             "BANKROLL ($)",
@@ -484,23 +563,14 @@ text-transform:uppercase;margin-bottom:3px;'>
         )
 
         # --- Pull real arb stats from live arbs DB -----
-        _live_arb_count = 0
-        _live_avg_net_edge_cents = 0.0
         try:
-            # Try PostgreSQL live_arbs_cloud first
-            from database.repository import get_engine as _ge_kelly
-            from sqlalchemy import text as _txt_kelly
-            _eng_kelly = _ge_kelly()
-            with _eng_kelly.connect() as _conn_kelly:
-                _k_row = _conn_kelly.execute(_txt_kelly(
-                    "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs_cloud "
-                    "WHERE net_edge_cents > 0"
-                )).fetchone()
-                if _k_row and _k_row[0]:
-                    _live_arb_count = int(_k_row[0])
-                    _live_avg_net_edge_cents = float(_k_row[1] or 0)
+            from dashboard.data_layer import get_live_arbs_cloud_stats as _glas_kelly
+            _kelly_stats = _glas_kelly()
+            _live_arb_count = _kelly_stats.get("count", 0)
+            _live_avg_net_edge_cents = _kelly_stats.get("avg_net_edge_cents", 0.0)
         except Exception:
-            pass
+            _live_arb_count = 0
+            _live_avg_net_edge_cents = 0.0
         # Fallback to live_arbs SQLite
         if _live_arb_count == 0:
             try:
@@ -510,12 +580,32 @@ text-transform:uppercase;margin-bottom:3px;'>
                 if _la_db.exists():
                     _lc = _sq_kelly.connect(str(_la_db), check_same_thread=False)
                     _lk = _lc.execute(
-                        "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs WHERE net_edge_cents > 0"
+                        "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs "
+                        "WHERE net_edge_cents > 0 AND strategy != 'yes_no_complement' "
+                        "AND strategy != 'collectively_exhaustive'"
                     ).fetchone()
                     _lc.close()
                     if _lk and _lk[0]:
                         _live_arb_count = int(_lk[0])
                         _live_avg_net_edge_cents = float(_lk[1] or 0)
+            except Exception:
+                pass
+        # Fallback: Neon cloud (live_arbs_cloud) — used on Streamlit Cloud where SQLite has no data
+        if _live_arb_count == 0:
+            try:
+                import dashboard.live_arb_store as _las_kelly
+                from sqlalchemy import text as _kelly_text
+                _kelly_eng = getattr(_las_kelly, "_pg_engine", None) or _las_kelly.get_pg_engine_cached()
+                if _kelly_eng is not None:
+                    with _kelly_eng.connect() as _kelly_c:
+                        _kelly_row = _kelly_c.execute(_kelly_text(
+                            "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs_cloud "
+                            "WHERE net_edge_cents > 0 AND strategy_type NOT IN "
+                            "('yes_no_complement','collectively_exhaustive')"
+                        )).fetchone()
+                    if _kelly_row and _kelly_row[0]:
+                        _live_arb_count = int(_kelly_row[0])
+                        _live_avg_net_edge_cents = float(_kelly_row[1] or 0)
             except Exception:
                 pass
         # Final fallback: use backtest trade stats if no live data
@@ -525,11 +615,11 @@ text-transform:uppercase;margin-bottom:3px;'>
 
         # --- Display live arb stats -----
         _lk_c1, _lk_c2 = st.columns(2)
-        _lk_c1.metric("LIVE ARB RECORDS", f"{_live_arb_count:,}", help="Count of YNC arbs in live_arbs DB with net_edge_cents > 0")
-        _lk_c2.metric("AVG NET EDGE", f"{_live_avg_net_edge_cents:.2f}¢", help="Average net edge per arb after Kalshi fees")
+        _lk_c1.metric("LIVE ARB RECORDS", f"{_live_arb_count:,}", help="ME/TH arbs in live_arbs DB with net_edge_cents > 0 (YNC feed artifacts excluded)")
+        _lk_c2.metric("AVG NET EDGE", f"{_live_avg_net_edge_cents:.2f}¢", help="Average net edge per ME/TH arb after Kalshi fees (YNC feed artifacts excluded)")
 
-        # --- Kelly formula for YNC arbs -----
-        _P_CE = 0.95  # assumed win probability for YES/NO complement arbs
+        # --- Kelly formula (all strategies; ME/TH primary) -----
+        _P_CE = 0.95  # assumed win probability (all strategies; conservative estimate)
         _net_edge_frac = _live_avg_net_edge_cents / 100.0  # convert cents to dollars (fraction of $1)
         _cost_to_enter = max(1.0 - _net_edge_frac, 0.01)  # avoid divide-by-zero
         _b_ratio = _net_edge_frac / _cost_to_enter if _cost_to_enter > 0 else 0.0
@@ -545,15 +635,15 @@ text-transform:uppercase;margin-bottom:3px;'>
             _kl_c3.metric(
                 "RECOMMENDED POSITION SIZE",
                 f"${_rec_pos_size:,.2f}",
-                help=f"Half-Kelly × bankroll (${_bankroll_input:,}). Based on avg YNC arb edge {_live_avg_net_edge_cents:.2f}¢.",
+                help=f"Half-Kelly × bankroll (${_bankroll_input:,}). Based on avg ME/TH arb edge {_live_avg_net_edge_cents:.2f}¢ (YNC feed artifacts excluded from DB query).",
             )
             st.progress(min(_kelly_live, 1.0))
             st.caption(
-                f"Kelly formula: (p×b − (1−p)) / b · p={_P_CE} (YNC win prob) · "
+                f"Kelly formula: (p×b − (1−p)) / b · p={_P_CE} (assumed win prob) · "
                 f"b={_b_ratio:.4f} (net_edge/cost_to_enter) · "
                 f"net_edge={_live_avg_net_edge_cents:.2f}¢ · "
                 f"cost_to_enter={_cost_to_enter*100:.2f}¢. "
-                f"Half-Kelly = ${_rec_pos_size:,.2f} per arb on a ${_bankroll_input:,} bankroll."
+                f"Half-Kelly = ${_rec_pos_size:,.2f} per ME/TH arb on a ${_bankroll_input:,} bankroll."
             )
             if _kelly_live > 0.25:
                 st.warning(f"High Kelly fraction ({_kelly_live:.0%}) — use half-Kelly or less to control ruin risk")
@@ -574,9 +664,9 @@ text-transform:uppercase;margin-bottom:3px;'>
                     _seen_br.add(_r["Bankroll"])
                     _dedup_rows.append(_r)
             st.dataframe(pd.DataFrame(_dedup_rows), use_container_width=True, hide_index=True)
-            st.caption("p=0.95 assumed win probability for YNC arbs. Adjust bankroll input above to update position sizes.")
+            st.caption("p=0.95 assumed win probability (all strategies; ME/TH arbs are primary actionable opportunities). Adjust bankroll input above to update position sizes.")
         else:
-            st.info("Insufficient live arb data to compute Kelly fraction. Ensure the live arb scanner is running and has logged arbs.")
+            st.info("Insufficient ME/TH arb data to compute Kelly fraction. Ensure the live scanner is running and has logged ME/TH arbs (YNC feed artifacts are excluded from this calculation).")
 
     # --- Kelly Criterion (Backtest) -----
     with st.expander("📊 Kelly Criterion — Backtest History", expanded=False):
@@ -1167,4 +1257,5 @@ padding:2rem;border-radius:3px;text-align:center;'>
 </div>""",
         unsafe_allow_html=True,
     )
+
 

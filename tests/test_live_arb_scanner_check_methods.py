@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_arb_scanner_check_methods.py
 ==============================================
 Unit tests for data/synthesis_live.py LiveArbScanner check methods:

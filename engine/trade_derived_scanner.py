@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/trade_derived_scanner.py
 ==================================
 Historical arbitrage detection from the **executed trade tape** (Class C).

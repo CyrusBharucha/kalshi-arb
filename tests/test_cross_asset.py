@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_cross_asset.py
 ==========================
 Unit tests for cross_asset/probability_engine.py.

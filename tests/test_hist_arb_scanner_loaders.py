@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_hist_arb_scanner_loaders.py
 ========================================
 Unit tests for analysis/historical_arb_scanner loader functions:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_fee_consistency.py
 ==============================
 Cross-module fee consistency tests.

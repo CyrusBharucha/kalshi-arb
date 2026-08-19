@@ -1,4 +1,4 @@
-"""
+﻿"""
 dashboard/pages/p02_live_arb.py
 ================================
 Live Arbitrage Opportunities page.
@@ -18,7 +18,7 @@ STALE       -- last update > 30s ago (possible stale book)
 DISAPPEARED -- edge gone, lifecycle manager closed it
 SETTLED     -- market settled, opportunity resolved
 
-Falls back to live WebSocket complement-arb scan when database is unavailable.
+Falls back to live WebSocket scan (ME/TH arbs + YNC feed artifacts) when database is unavailable.
 """
 from __future__ import annotations
 import html as _html
@@ -92,8 +92,7 @@ def _kalshi_event_url(event_ticker: str) -> str:
 
 
 _STRATEGIES = [
-    "All", "mutually_exclusive", "superset", "threshold_order", "collectively_exhaustive",
-    "yes_no_complement",
+    "All", "yes_no_complement", "mutually_exclusive", "threshold_order",
 ]
 
 _STATUS_COLORS = {
@@ -115,7 +114,7 @@ def render():
 LIVE ARBITRAGE
 </span>
 <span style='font-size:0.68rem;color:#64748B;letter-spacing:0.04em;margin-left:1rem;'>
-Real-time executable opportunities
+ME/TH arbs (executable) · YNC feed artifacts (not executable) · CE disabled
 </span>
 </div>
 """, unsafe_allow_html=True)
@@ -129,7 +128,7 @@ Real-time executable opportunities
     # -- Auto-refresh controls --
     rc1, rc2, rc3 = st.columns([1, 1, 4])
     with rc1:
-        auto_refresh = st.checkbox("AUTO REFRESH", value=True, key="live_arb_auto_refresh")
+        auto_refresh = st.checkbox("AUTO REFRESH", value=False, key="live_arb_auto_refresh")
     with rc2:
         refresh_interval = st.selectbox(
             "INTERVAL", [10, 15, 30, 60], index=1,
@@ -205,7 +204,8 @@ Real-time executable opportunities
             st.caption(
                 "Source: arbitrage_opportunities DB table (status='open' rows). "
                 "These are persisted detections from the scanner — NOT the live in-memory ws_bridge queue shown above. "
-                "Rows here survive session restarts; the live cards above are lost on page reload."
+                "Rows here survive session restarts; the live cards above are lost on page reload. "
+                "ME/TH rows are actionable arbs; YNC rows are feed/rounding artifacts — not executable."
             )
             _hist_df, _hist_err = get_live_arb_opportunities(
                 strategy=strategy_arg,
@@ -223,7 +223,7 @@ Real-time executable opportunities
                 st.markdown(
                     f"<div style='font-size:0.65rem;color:{TEXT3};"
                     f"font-family:JetBrains Mono,monospace;padding:0.4rem 0;line-height:1.6;'>"
-                    f"{len(_hist_df):,} open opportunities persisted since {_p02_arb_date}.</div>",
+                    f"{len(_hist_df):,} records persisted since {_p02_arb_date} (ME/TH arbs are actionable; YNC records are feed artifacts).</div>",
                     unsafe_allow_html=True,
                 )
                 _hd = _hist_df.copy()
@@ -249,7 +249,7 @@ Real-time executable opportunities
         _render_session_arb_history()
         _render_today_arb_log()
         st.markdown("<hr>", unsafe_allow_html=True)
-        with st.expander("📼 RECENT ARBS (Last 10)", expanded=False):
+        with st.expander("📼 RECENT DETECTIONS (Last 10 from DB)", expanded=False):
             _render_recent_arbs_store()
         if auto_refresh and (not _is_sqlite or _ws_live):
             import time as _time
@@ -268,7 +268,8 @@ Real-time executable opportunities
         st.caption(
             "Source: arbitrage_opportunities DB table (status='open' rows). "
             "These are persisted scanner detections — not the live in-memory ws_bridge queue. "
-            "Rows survive session restarts; the live cards above are lost on page reload."
+            "Rows survive session restarts; the live cards above are lost on page reload. "
+            "ME/TH rows are actionable arbs; YNC rows are feed/rounding artifacts — not executable."
         )
         _hist_df, _hist_err = get_live_arb_opportunities(
             strategy=strategy_arg,
@@ -285,7 +286,7 @@ Real-time executable opportunities
                     pass
             st.markdown(
                 f"<div style='font-size:0.65rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
-                f"padding:0.4rem 0;line-height:1.6;'>{len(_hist_df):,} open opportunities persisted since {_p02b_date}.</div>",
+                f"padding:0.4rem 0;line-height:1.6;'>{len(_hist_df):,} records persisted since {_p02b_date} (ME/TH arbs are actionable; YNC records are feed artifacts).</div>",
                 unsafe_allow_html=True,
             )
             _hd = _hist_df.copy()
@@ -307,12 +308,8 @@ Real-time executable opportunities
             st.info("No historical opportunities in the database.")
     _render_today_arb_log()
     st.markdown("<hr>", unsafe_allow_html=True)
-    with st.expander("📼 RECENT ARBS (Last 10)", expanded=False):
+    with st.expander("📼 RECENT DETECTIONS (Last 10)", expanded=False):
         _render_recent_arbs_store()
-
-    # -- Execution Log --
-    st.markdown("<hr>", unsafe_allow_html=True)
-    _render_execution_log()
 
     if auto_refresh and (not _is_sqlite or _ws_live):
         import time as _time
@@ -347,11 +344,11 @@ def _render_recent_arbs_store():
             _conn_ras = _gsc_ras()
             if _conn_ras:
                 try:
-                    _cnt_row = _conn_ras.execute("SELECT COUNT(*) FROM arbs").fetchone()
+                    _cnt_row = _conn_ras.execute("SELECT COUNT(*) FROM arbs WHERE strategy != 'collectively_exhaustive'").fetchone()
                     _total_count = int(_cnt_row[0]) if _cnt_row else 0
                     _raw_ras = _conn_ras.execute(
                         "SELECT ticker, strategy, net_edge_cents, gross_edge_cents, ts "
-                        "FROM arbs ORDER BY ts DESC LIMIT 10"
+                        "FROM arbs WHERE strategy != 'collectively_exhaustive' ORDER BY ts DESC LIMIT 10"
                     ).fetchall()
                     _rows_ras = _raw_ras
                 except Exception:
@@ -359,27 +356,36 @@ def _render_recent_arbs_store():
                 finally:
                     _conn_ras.close()
         else:
-            # PostgreSQL path
-            try:
-                from dashboard.data_layer import get_db_connection as _get_db_ras
-                _conn_pg = _get_db_ras()
-                if _conn_pg:
-                    with _conn_pg.cursor() as _cur_ras:
-                        _cur_ras.execute("SELECT COUNT(*) FROM arbs")
-                        _cnt_pg = _cur_ras.fetchone()
-                        _total_count = int(_cnt_pg[0]) if _cnt_pg else 0
-                        _cur_ras.execute(
-                            "SELECT ticker, strategy, net_edge_cents, gross_edge_cents, ts "
-                            "FROM arbs ORDER BY ts DESC LIMIT 10"
-                        )
-                        _rows_ras = _cur_ras.fetchall()
-                    _conn_pg.close()
-            except Exception:
-                _rows_ras = []
+            # PostgreSQL path — use cached function (count + recent rows in one query)
+            from dashboard.data_layer import get_arb_store_recent as _gasr
+            _recent_data = _gasr(limit=10)
+            _total_count = _recent_data.get("total_count", 0)
+            _rows_ras = _recent_data.get("rows", [])
 
         if not _rows_ras:
-            st.info("No arbs logged yet — arbs appear here once detected and saved")
-            st.caption("0 arbs logged in DB")
+            # Fallback: try Neon live_arbs_cloud
+            try:
+                import dashboard.live_arb_store as _las_ras
+                from sqlalchemy import text as _ras_text
+                _ras_eng = getattr(_las_ras, "_pg_engine", None) or _las_ras.get_pg_engine_cached()
+                if _ras_eng is not None:
+                    with _ras_eng.connect() as _ras_c:
+                        _cnt_neon = _ras_c.execute(_ras_text(
+                            "SELECT COUNT(*) FROM live_arbs_cloud WHERE strategy_type != 'collectively_exhaustive'"
+                        )).fetchone()
+                        _raw_neon = _ras_c.execute(_ras_text(
+                            "SELECT ticker, strategy_type, net_edge_cents, gross_edge_cents, detected_at "
+                            "FROM live_arbs_cloud WHERE strategy_type != 'collectively_exhaustive' "
+                            "ORDER BY detected_at DESC LIMIT 10"
+                        )).fetchall()
+                    if _raw_neon:
+                        _total_count = int(_cnt_neon[0]) if _cnt_neon else len(_raw_neon)
+                        _rows_ras = [(r[0], r[1], r[2], r[3], r[4]) for r in _raw_neon]
+            except Exception:
+                pass
+        if not _rows_ras:
+            st.info("No records logged yet — detections appear here once detected and saved")
+            st.caption("0 records logged in DB")
             return
 
         _now_ras_epoch = _time_ras.time()
@@ -427,13 +433,13 @@ def _render_recent_arbs_store():
         st.markdown(
             "<div style='font-size:0.6rem;letter-spacing:0.12em;text-transform:uppercase;"
             f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
-            "RECENT ARBS (LAST 10) — FROM DB</div>",
+            "RECENT DETECTIONS (LAST 10) — FROM DB</div>",
             unsafe_allow_html=True,
         )
         st.dataframe(_disp_df, use_container_width=True, height=min(385, 35 * len(_disp_df) + 45), hide_index=True)
-        st.caption(f"{_total_count} arbs logged in DB")
+        st.caption(f"{_total_count:,} total records in DB (all strategies; YNC records are feed artifacts — ME/TH are actionable)")
     except Exception:
-        st.info("No arbs logged yet — arbs appear here once detected and saved")
+        st.info("No records logged yet — detections appear here once detected and saved")
 
 
 def _render_today_arb_log():
@@ -449,7 +455,7 @@ def _render_today_arb_log():
 
     st.markdown("<hr>", unsafe_allow_html=True)
     with st.expander(
-        f"💾 TODAY'S CONFIRMED ARB LOG — {len(_rows_log)} detections (persistent across restarts)",
+        f"💾 TODAY'S DETECTION LOG — {len(_rows_log)} detections (ME/TH arbs + YNC feed artifacts; persistent across restarts)",
         expanded=False,
     ):
         st.caption(
@@ -472,7 +478,7 @@ def _render_today_arb_log():
             _net_l  = float(_r.get("net_edge_cents", 0))
             _n_legs_l = len(_legs) if _legs else ""
             if _strat_l == "yes_no_complement":
-                _act_l = "Buy YES + NO (same market)"
+                _act_l = "Feed artifact (not executable)"
             elif _strat_l == "collectively_exhaustive":
                 _act_l = f"Buy YES on all {_n_legs_l} legs" if _n_legs_l else "Buy YES on all legs"
             elif _strat_l == "mutually_exclusive":
@@ -522,7 +528,7 @@ def _render_recently_closed():
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.12em;text-transform:uppercase;"
         f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
-        f"RECENTLY CLOSED OPPORTUNITIES (LAST 1H)</div>",
+        f"RECENTLY CLOSED RECORDS (LAST 1H — ME/TH arbs + YNC feed artifacts)</div>",
         unsafe_allow_html=True,
     )
 
@@ -571,7 +577,7 @@ def _render_session_arb_history():
     _sess_total = _state2.get_session_stats().get("total", 0)
     if not _session_arbs_raw:
         # Still show a "0 arbs this session" note so user knows scanner is active
-        st.caption(f"📡 Scanner active — 0 arbs detected this session (scanning every 1s)")
+        st.caption(f"📡 Scanner active — 0 ME/TH arbs or YNC feed artifacts detected this session yet (scanning every 1s)")
         return
 
     # Split clean vs. high-edge (pre-fix suspect): net_edge_cents > 50c
@@ -595,16 +601,16 @@ def _render_session_arb_history():
 
     st.markdown("<hr>", unsafe_allow_html=True)
     with st.expander(
-        f"📡 SESSION ARB HISTORY — {_showing_n} unique arb{'s' if _showing_n != 1 else ''} this session"
+        f"📡 SESSION DETECTION HISTORY — {_showing_n} unique detection{'s' if _showing_n != 1 else ''} this session (ME/TH arbs + YNC feed artifacts)"
         + (f" ({_n_redetects} re-detections hidden)" if _n_redetects else "")
         + (f" ({_n_high} high-edge hidden)" if _n_high else ""),
         expanded=False,
     ):
         st.markdown(
             f"<div style='font-size:0.65rem;color:{TEXT3};margin-bottom:0.4rem;'>"
-            f"Unique arbs detected this session (1s scan, YES/NO complement). "
+            f"Unique detections this session (1s scan, ME + TH arbs + YNC feed artifacts; CE disabled). "
             f"Same event re-detected every 5 min as Gate 5 TTL resets — showing latest detection per event only. "
-            f"Entries with net_edge &gt; 50c are hidden below — they may be pre-fix stale-book CE detections.</div>",
+            f"Entries with net_edge &gt; 50c are hidden below — they may be stale-book detections.</div>",
             unsafe_allow_html=True,
         )
         # Pre-warm title cache in parallel before looping (avoids N × 2s sequential HTTP)
@@ -656,7 +662,7 @@ def _render_session_arb_history():
             _n_legs_h = len(_legs_h) if _legs_h else ""
             _tn_h = f" — {_title_h}" if _title_h else ""
             if _strat_raw == "yes_no_complement":
-                _action_h = f"Buy YES + NO on same market{_tn_h}"
+                _action_h = f"Feed artifact — not executable{_tn_h}"
             elif _is_ce_h:
                 _action_h = f"Buy YES on all {_n_legs_h} candidates{_tn_h}" if _n_legs_h else f"Buy YES on all candidates{_tn_h}"
             elif _is_me_h:
@@ -715,8 +721,8 @@ def _render_session_arb_history():
                 st.markdown(
                     f"<div style='font-size:0.63rem;color:{AMBER};margin-bottom:0.5rem;'>"
                     f"⚠️ pre-fix? &nbsp; These {_n_high} entr{'y' if _n_high==1 else 'ies'} have net_edge &gt; 50c. "
-                    f"High-edge CE arbs detected before the Gate 1b stale-book fix was deployed "
-                    f"may have been re-detected from stale order books. Review before acting.</div>",
+                    f"High-edge entries flagged as suspected pre-fix stale-book detections (before Gate 1b). "
+                    f"CE scanner is currently disabled — these are historical records only, not actionable.</div>",
                     unsafe_allow_html=True,
                 )
                 _hi_rows = []
@@ -746,17 +752,36 @@ def _render_session_arb_history():
 
 
 def _no_opps_banner(n_markets: int = 0, mps: float = 0.0, min_edge_cents: float = 0.0, last_scan_str: str = "--"):
-    from dashboard.styles import PANEL, BORDER, TEXT3
+    import streamlit as _st_nob
+    from dashboard.styles import PANEL, BORDER, TEXT3, GREEN as _G_NOB, AMBER as _A_NOB
     _markets_str = f"{n_markets:,} markets" if n_markets > 0 else "markets"
     _mps_str = f"{mps:.1f} msg/s" if mps > 0 else "--"
     _edge_str = f"≥ {min_edge_cents:.1f}¢" if min_edge_cents > 0 else "after fees"
-    _scan_line = f"Last scan: {last_scan_str}" if last_scan_str and last_scan_str != "--" else "Scanner running"
+    _is_live = mps > 0 or n_markets > 0
+    # Check if Neon is available (cloud mode) — determines banner title
+    _nob_neon_ok = bool(_st_nob.session_state.get("_sidebar_neon_ok", False))
+    if not _nob_neon_ok:
+        try:
+            import dashboard.live_arb_store as _las_nob
+            _nob_neon_ok = (
+                bool(getattr(_las_nob, "_pg_ok", False))
+                or (getattr(_las_nob, "_pg_engine", None) is not None)
+            )
+        except Exception:
+            pass
+    if _is_live:
+        _title = "NO ME/TH ARBS DETECTED — SCANNER IS RUNNING"
+    elif _nob_neon_ok:
+        _title = "SCANNER OFFLINE — NEON CLOUD DATA BELOW"
+    else:
+        _title = "SCANNER OFFLINE — HISTORICAL DATA BELOW"
+    _scan_line = f"Last scan: {last_scan_str}" if last_scan_str and last_scan_str != "--" else ("Scanner running" if _is_live else ("Neon cloud connected — historical arbs available" if _nob_neon_ok else "Start the scanner to detect live arbs"))
     st.markdown(
         f"""<div style='background:{PANEL};border:1px solid {BORDER};
 padding:2rem;border-radius:3px;text-align:center;'>
 <div style='font-family:JetBrains Mono,monospace;font-size:0.85rem;
 color:{TEXT3};letter-spacing:0.06em;'>
-NO LIVE ARBS DETECTED — SCANNER IS RUNNING
+{_title}
 </div>
 <div style='font-size:0.7rem;color:{TEXT3};margin-top:0.5rem;'>
 No fee-adjusted edge {_edge_str} found right now. Adjust MIN NET EDGE above to widen the search.
@@ -768,6 +793,37 @@ font-family:JetBrains Mono,monospace;letter-spacing:0.04em;'>
 </div>""",
         unsafe_allow_html=True,
     )
+    # When scanner is offline, show Neon historical summary inline
+    if not _is_live:
+        try:
+            import dashboard.live_arb_store as _las_p02
+            from sqlalchemy import text as _nob_text
+            _eng_nob = getattr(_las_p02, "_pg_engine", None) or _las_p02.get_pg_engine_cached()
+            if _eng_nob is not None:
+                with _eng_nob.connect() as _c_nob:
+                    _r_nob = _c_nob.execute(_nob_text(
+                        "SELECT COUNT(*), MAX(net_edge_cents), AVG(net_edge_cents), "
+                        "MAX(detected_at) "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type != 'collectively_exhaustive' "
+                        "AND net_edge_cents > 0 AND gross_edge_cents < 50"
+                    )).fetchone()
+                if _r_nob and _r_nob[0]:
+                    _last_det = str(_r_nob[3])[:16] if _r_nob[3] else "--"
+                    st.markdown(
+                        f"<div style='margin-top:0.75rem;background:#0F172A;border:1px solid {_G_NOB}33;"
+                        f"border-left:3px solid {_G_NOB};border-radius:3px;padding:0.6rem 1rem;"
+                        f"font-family:JetBrains Mono,monospace;font-size:0.68rem;color:{TEXT3};'>"
+                        f"<span style='color:{_G_NOB};'>● NEON CLOUD</span> — "
+                        f"<strong style='color:#E2E8F0;'>{int(_r_nob[0])}</strong> historical arbs &nbsp;·&nbsp; "
+                        f"Best: <strong style='color:{_G_NOB};'>{float(_r_nob[1]):.2f}c</strong> &nbsp;·&nbsp; "
+                        f"Avg: <strong style='color:#E2E8F0;'>{float(_r_nob[2]):.2f}c</strong> &nbsp;·&nbsp; "
+                        f"Last: {_last_det}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+        except Exception:
+            pass
 
 
 def _fmt_live_status(age_s) -> str:
@@ -936,14 +992,14 @@ def _render_arb_inspect(arbs: list):
         for i, a in enumerate(arbs)
     ]
     sel = st.selectbox(
-        "Select arb to inspect", labels, index=None,
-        placeholder="Choose an opportunity…", key="live_arb_inspect_sel",
+        "Select detection to inspect", labels, index=None,
+        placeholder="Choose a detection…", key="live_arb_inspect_sel",
     )
     if sel is None:
         return
     idx = int(sel.split(":")[0])
     arb = arbs[idx]
-    with st.expander("ARB DETAIL", expanded=True):
+    with st.expander("DETECTION DETAIL", expanded=True):
         ticker  = arb.get("ticker", "--")
         strat   = arb.get("strategy", "--")
         legs    = arb.get("legs", [])
@@ -1004,14 +1060,13 @@ def _render_arb_inspect(arbs: list):
         ) if qty > 0 else f"**Market link:** [{ticker}]({_kalshi_url})  \n\n"
 
         if strat == "yes_no_complement":
-            _ync_name = f"**{_insp_title}**" if _insp_title else f"`{ticker}`"
             guide = (
                 _summary +
-                f"Buy YES + NO on the same market ({_ync_name}):  \n"
-                f"1. Buy YES on `{ticker}` at **{ya:.4f}**  \n"
-                f"2. Buy NO on `{ticker}` at **{na:.4f}** (simultaneously)  \n"
-                f"Combined cost: **{ya+na:.4f}** — guaranteed profit: **{1-(ya+na):.4f}** per contract "
-                f"({net:.2f}c net after fees)."
+                "⚠ **YNC is a feed/rounding artifact — not executable.**  \n"
+                "Kalshi YES and NO on the same market are always complements: "
+                "live YES ask + NO ask ≥ $1.00 structurally.  \n"
+                "This detection reflects a momentary quote below parity in the WS feed, "
+                "not a real arbitrage opportunity."
             )
         elif strat == "collectively_exhaustive":
             _leg_list = legs or [ticker]
@@ -1089,20 +1144,60 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
             _last_det_str = "--"
     else:
         _last_det_str = "--"
-    k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
+    # Fallback: pull last detection timestamp from Neon when no session data
+    if _last_det_str == "--":
+        try:
+            import dashboard.live_arb_store as _las_p02_kpi
+            from sqlalchemy import text as _p02_kpi_text
+            _p02_kpi_eng = getattr(_las_p02_kpi, "_pg_engine", None) or _las_p02_kpi.get_pg_engine_cached()
+            if _p02_kpi_eng is not None:
+                with _p02_kpi_eng.connect() as _p02_kpi_c:
+                    _p02_last_row = _p02_kpi_c.execute(_p02_kpi_text(
+                        "SELECT MAX(detected_at) FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement','collectively_exhaustive')"
+                    )).fetchone()
+                if _p02_last_row and _p02_last_row[0]:
+                    _p02_last_dt = _p02_last_row[0]
+                    if hasattr(_p02_last_dt, "strftime"):
+                        import time as _p02_time
+                        _p02_age = _p02_time.time() - _p02_last_dt.timestamp()
+                        if _p02_age < 86400:
+                            _last_det_str = _p02_last_dt.strftime("%H:%M UTC") + " (Neon)"
+                        else:
+                            _last_det_str = _p02_last_dt.strftime("%b %-d") + " (Neon)"
+        except Exception:
+            pass
+    # Feed status: on Streamlit Cloud with Neon connected, show CLOUD not CONNECTING
+    _p02_feed_status: str
+    if connected:
+        _p02_feed_status = "● LIVE"
+    else:
+        try:
+            import dashboard.live_arb_store as _las_p02_feed
+            _p02_neon_ok = (
+                bool(getattr(_las_p02_feed, "_pg_ok", False))
+                or (getattr(_las_p02_feed, "_pg_engine", None) is not None)
+                or bool(st.session_state.get("_sidebar_neon_ok", False))
+            )
+        except Exception:
+            _p02_neon_ok = False
+        _p02_feed_status = "● CLOUD" if _p02_neon_ok else "◔ CONNECTING"
+    _me_arbs = [a for a in arbs if a.get("strategy") == "mutually_exclusive"]
+    _th_arbs = [a for a in arbs if a.get("strategy") == "threshold_order"]
+    k1, k2, k2b, k2c, k3, k4, k5, k6, k7 = st.columns(9)
     k1.metric("MARKETS LIVE", f"{n_markets:,}")
-    k2.metric("COMPLEMENT", str(len(complement_arbs)))
-    k3.metric("CE + ME + TH", str(len(ce_arbs) + len(other_arbs)),
-              help="Collectively Exhaustive + Mutually Exclusive + Threshold Order arbs")
+    k2.metric("YNC DETECT", str(len(complement_arbs)))
+    k2b.metric("ME ARBS", str(len(_me_arbs)))
+    k2c.metric("TH ARBS", str(len(_th_arbs)))
     if arbs:
         best = max(a["net_edge_cents"] for a in arbs)
-        k4.metric("BEST NET EDGE", f"+{best:.2f}c")
+        k3.metric("BEST NET EDGE", f"+{best:.2f}c")
     else:
-        k4.metric("BEST NET EDGE", "--")
-    k5.metric("FEED", "● LIVE" if connected else "◔ CONNECTING")
-    k6.metric("MSG/S", f"{_mps:.1f}")
-    k7.metric("SCAN INTERVAL", "1s")
-    k8.metric("LAST DETECTION", _last_det_str)
+        k3.metric("BEST NET EDGE", "--")
+    k4.metric("FEED", _p02_feed_status)
+    k5.metric("MSG/S", f"{_mps:.1f}")
+    k6.metric("SCAN INTERVAL", "1s")
+    k7.metric("LAST DETECTION", _last_det_str)
 
     st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
 
@@ -1116,11 +1211,7 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 f"<div style='background:#1e3a2e;border:1px solid #22c55e;border-radius:4px;"
                 f"padding:0.45rem 1rem;margin-bottom:0.6rem;font-family:JetBrains Mono,monospace;"
                 f"font-size:0.72rem;color:#86efac;letter-spacing:0.04em;'>"
-                f"&#128680; YNC: <strong>{_counts['ync']}</strong> "
-                f"&nbsp;|&nbsp; CE: <strong>{_counts['ce']}</strong> "
-                f"&nbsp;|&nbsp; ME: <strong>{_counts['me']}</strong> "
-                f"&nbsp;|&nbsp; TH: <strong>{_counts['th']}</strong> "
-                f"&nbsp;&nbsp;arbs detected this session"
+                f"&#128680; <strong>{_total_session}</strong> scanner detections this session (ME/TH arbs + YNC feed artifacts)"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -1129,28 +1220,25 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
 
     st.markdown(
         f"<div style='font-size:0.65rem;color:{TEXT3};margin-bottom:0.4rem;'>"
-        f"Real-time scan — 5 strategies: YES/NO complement, collectively exhaustive, mutually exclusive, superset, threshold order. "
-        f"Scanning {n_markets:,} live markets via Synthesis WebSocket.</div>",
+        f"Real-time scan — ME (mutually exclusive) and TH (threshold order) arbs; YNC feed artifacts (structural — not executable). "
+        f"CE scanning is currently disabled. Scanning {n_markets:,} live markets via Synthesis WebSocket.</div>",
         unsafe_allow_html=True,
     )
 
     # -- Strategy summary line
     _n_ync_sum = len([a for a in arbs if a.get("strategy") == "yes_no_complement"])
-    _n_ce_sum  = len([a for a in arbs if a.get("strategy") == "collectively_exhaustive"])
     _n_me_sum  = len([a for a in arbs if a.get("strategy") == "mutually_exclusive"])
     _n_th_sum  = len([a for a in arbs if a.get("strategy") == "threshold_order"])
-    _n_ss_sum  = len([a for a in arbs if a.get("strategy") == "superset"])
     if arbs:
-        _sum_parts = []
-        if _n_ync_sum: _sum_parts.append(f"<span style='color:#0f766e;font-weight:700;'>{_n_ync_sum} YNC</span>")
-        if _n_ce_sum:  _sum_parts.append(f"<span style='color:#1d4ed8;font-weight:700;'>{_n_ce_sum} CE</span>")
-        if _n_me_sum:  _sum_parts.append(f"<span style='color:#7c3aed;font-weight:700;'>{_n_me_sum} ME</span>")
-        if _n_th_sum:  _sum_parts.append(f"<span style='color:#b45309;font-weight:700;'>{_n_th_sum} TH</span>")
-        if _n_ss_sum:  _sum_parts.append(f"<span style='color:#7c3aed;font-weight:700;'>{_n_ss_sum} SS</span>")
-        _sum_html = " &nbsp;·&nbsp; ".join(_sum_parts)
+        _strat_parts = []
+        if _n_ync_sum: _strat_parts.append(f"{_n_ync_sum} YNC")
+        if _n_me_sum:  _strat_parts.append(f"{_n_me_sum} ME")
+        if _n_th_sum:  _strat_parts.append(f"{_n_th_sum} TH")
+        _strat_str = " · ".join(_strat_parts) if _strat_parts else f"{len(arbs)} detections"
         st.markdown(
             f"<div style='font-size:0.68rem;color:{TEXT3};margin-bottom:0.75rem;'>"
-            f"Showing <strong style='color:{TEXT};'>{len(arbs)}</strong> arbs: {_sum_html}</div>",
+            f"Showing <strong style='color:{TEXT};'>{len(arbs)}</strong> detections "
+            f"<span style='color:{TEXT3};'>({_strat_str})</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -1171,15 +1259,61 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         )
         try:
             import time as _time_cd
-            _time_until_next = 30 - (int(_time_cd.time()) % 30)
-            st.caption(f"🔄 Next scan in {_time_until_next}s · Scanner runs continuously (30s cycle)")
+            _time_until_next = 1 - (int(_time_cd.time()) % 1)
+            st.caption(f"🔄 Next scan in {_time_until_next}s · Scanner runs continuously (1s cycle)")
         except Exception:
             pass
         st.markdown("<hr>", unsafe_allow_html=True)
-        for _strat in ["yes_no_complement", "collectively_exhaustive",
-                       "mutually_exclusive", "superset", "threshold_order"]:
-            _relationship_panel(_strat)
-            st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
+        # --- Neon recent arbs table (shown when scanner offline but Neon connected) ---
+        try:
+            import dashboard.live_arb_store as _las_p02rt
+            from sqlalchemy import text as _p02rt_text
+            _p02rt_eng = (
+                getattr(_las_p02rt, "_pg_engine", None)
+                or _las_p02rt.get_pg_engine_cached()
+            )
+            if _p02rt_eng is not None:
+                with _p02rt_eng.connect() as _p02rt_c:
+                    _p02rt_rows = _p02rt_c.execute(_p02rt_text(
+                        "SELECT ticker, strategy_type, net_edge_cents, "
+                        "gross_edge_cents, detected_at "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type != 'collectively_exhaustive' "
+                        "AND net_edge_cents > 0 "
+                        "ORDER BY detected_at DESC LIMIT 15"
+                    )).fetchall()
+                if _p02rt_rows:
+                    from dashboard.styles import TEXT3 as _TEXT3_p02rt, GREEN as _G_p02rt
+                    import pandas as _pd_p02rt
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;"
+                        f"text-transform:uppercase;color:{_TEXT3_p02rt};"
+                        f"margin:0.75rem 0 0.4rem;'>"
+                        f"<span style='color:{_G_p02rt};'>●</span> RECENT NEON CLOUD ARBS</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _p02rt_df = _pd_p02rt.DataFrame(
+                        _p02rt_rows,
+                        columns=["Ticker", "Strategy", "Net Edge", "Gross Edge", "Detected At"]
+                    )
+                    _p02rt_df["Net Edge"] = _p02rt_df["Net Edge"].apply(
+                        lambda v: f"{float(v):.2f}¢" if v else "--"
+                    )
+                    _p02rt_df["Gross Edge"] = _p02rt_df["Gross Edge"].apply(
+                        lambda v: f"{float(v):.2f}¢" if v else "--"
+                    )
+                    _p02rt_df["Detected At"] = _p02rt_df["Detected At"].apply(
+                        lambda v: str(v)[:16] if v else "--"
+                    )
+                    st.dataframe(
+                        _p02rt_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(400, 35 * len(_p02rt_rows) + 45),
+                    )
+        except Exception:
+            pass
+        _relationship_panel("yes_no_complement")
         return
 
     # -- SQLite DB path for close_time lookups
@@ -1264,7 +1398,8 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
     _ce_slice         = [a for a in arbs if a.get("strategy") == "collectively_exhaustive"][:10]
 
     if _complement_slice:
-        _section_header("YES / NO COMPLEMENT", "Buy YES + NO on same market")
+        _section_header("YES / NO COMPLEMENT", "Feed/rounding artifacts — live YNC sum is always ≥ $1.00 structurally")
+        st.caption("⚠ YNC detections below are feed/rounding artifacts. Kalshi YES/NO are structurally complementary; live round-trip cost is always ≥ $1.00. ME and TH arbs (below) are the actionable opportunities.")
     for _arb in _complement_slice:
         _ticker = _html.escape(str(_arb.get("ticker", "--")))
         _ya = _arb.get("yes_ask", 0)
@@ -1451,9 +1586,9 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         # Execution instruction (per-card, shown as card footer)
         if _strategy == "yes_no_complement":
             _exec_instr = (
-                f"BUY YES on <strong>{_ticker}</strong> at {_ya*100:.0f}&#162;"
-                f" + BUY NO on <strong>{_ticker}</strong> at {_na*100:.0f}&#162;"
-                f" &nbsp;({(_ya+_na)*100:.0f}&#162; total cost, locked {_ttl})"
+                f"&#9888; <strong>NOT EXECUTABLE</strong> &mdash; YNC is a feed/rounding artifact. "
+                f"Live YES ask + NO ask = {(_ya+_na)*100:.0f}&#162; &ge; 100&#162; structurally; "
+                f"sub-100&#162; quotes reflect WS feed latency, not a real arb."
             )
         elif _is_ce:
             _n_legs_exec = len(_legs) if _legs else "?"
@@ -1720,77 +1855,88 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         st.markdown(_card_html, unsafe_allow_html=True)
         if _scan_idx_caption:
             st.caption(_scan_idx_caption)
-        # -- Execution checklist per complement arb card
+        # -- Execution checklist (suppressed for YNC — feed artifacts, not executable)
         try:
-            _arb_id_key = (
-                str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:30]
-                + "_" + str(_arb.get("strategy", "ync"))[:6]
-            )
-            _net_ync  = float(_arb.get("net_edge_cents", 0))
-            _ya_c_ync = float(_arb.get("yes_ask", 0)) * 100
-            _na_c_ync = float(_arb.get("no_ask", 0)) * 100
-            _fee_ync  = float(_arb.get("fees_cents", 0))
-            with st.expander("Execution Checklist", expanded=False):
-                _cb1 = st.checkbox(
-                    f"✅ Verified YES bid ≥ {_ya_c_ync:.0f}¢ still holds (check live feed)",
-                    key=f"check_{_arb_id_key}_1",
+            if _arb.get("strategy") == "yes_no_complement":
+                pass  # YNC cards: artifact warning already shown above; no execution guide
+            else:
+                _arb_id_key = (
+                    str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:30]
+                    + "_" + str(_arb.get("strategy", "ync"))[:6]
                 )
-                _cb2 = st.checkbox(
-                    f"✅ Verified NO bid ≥ {_na_c_ync:.0f}¢ still holds",
-                    key=f"check_{_arb_id_key}_2",
-                )
-                _cb3 = st.checkbox(
-                    f"✅ Calculated net edge ≥ 2¢ after {_fee_ync:.2f}¢ fees per leg",
-                    key=f"check_{_arb_id_key}_3",
-                )
-                _cb4 = st.checkbox(
-                    "✅ Position size within Kelly fraction (see Backtest page)",
-                    key=f"check_{_arb_id_key}_4",
-                )
-                _cb5 = st.checkbox(
-                    "✅ Not already in this position",
-                    key=f"check_{_arb_id_key}_5",
-                )
-                _cb6 = st.checkbox(
-                    "✅ Verified prices in Kalshi UI before executing",
-                    key=f"check_{_arb_id_key}_6",
-                )
-                if _cb1 and _cb2 and _cb3 and _cb4 and _cb5 and _cb6:
-                    _ync_tk2  = str(_arb.get("ticker", "--")).split(" (")[0]
-                    _ync_snippet2 = (
-                        f"# Arb: {_ync_tk2}\n"
-                        f"# Strategy: {str(_arb.get('strategy','ync')).upper()}\n"
-                        f"# Leg 1: BUY YES on {_ync_tk2} @ {_ya_c_ync:.0f}¢\n"
-                        f"# Leg 2: BUY NO on {_ync_tk2} @ {_na_c_ync:.0f}¢\n"
-                        f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                _net_ync  = float(_arb.get("net_edge_cents", 0))
+                _ya_c_ync = float(_arb.get("yes_ask", 0)) * 100
+                _na_c_ync = float(_arb.get("no_ask", 0)) * 100
+                _fee_ync  = float(_arb.get("fees_cents", 0))
+                with st.expander("Execution Checklist", expanded=False):
+                    _cb1 = st.checkbox(
+                        f"✅ Verified YES bid ≥ {_ya_c_ync:.0f}¢ still holds (check live feed)",
+                        key=f"check_{_arb_id_key}_1",
                     )
-                    st.success("\U0001f680 Ready to execute — place orders on Kalshi.com")
-                    st.code(_ync_snippet2, language="bash")
-                else:
-                    st.info("Complete all checks before executing")
+                    _cb2 = st.checkbox(
+                        f"✅ Verified NO bid ≥ {_na_c_ync:.0f}¢ still holds",
+                        key=f"check_{_arb_id_key}_2",
+                    )
+                    _cb3 = st.checkbox(
+                        f"✅ Calculated net edge ≥ 2¢ after {_fee_ync:.2f}¢ fees per leg",
+                        key=f"check_{_arb_id_key}_3",
+                    )
+                    _cb4 = st.checkbox(
+                        "✅ Position size within Kelly fraction (see Backtest page)",
+                        key=f"check_{_arb_id_key}_4",
+                    )
+                    _cb5 = st.checkbox(
+                        "✅ Not already in this position",
+                        key=f"check_{_arb_id_key}_5",
+                    )
+                    _cb6 = st.checkbox(
+                        "✅ Verified prices in Kalshi UI before executing",
+                        key=f"check_{_arb_id_key}_6",
+                    )
+                    if _cb1 and _cb2 and _cb3 and _cb4 and _cb5 and _cb6:
+                        _exec_tk2   = str(_arb.get("ticker", "--")).split(" (")[0]
+                        _exec_strat = str(_arb.get("strategy", "")).lower()
+                        if _exec_strat == "mutually_exclusive":
+                            _legs_me = _arb.get("legs") or []
+                            _legs_str = "\n".join(f"#   BUY NO on {l if isinstance(l, str) else l.get('ticker', str(l))}" for l in _legs_me) if _legs_me else f"#   BUY NO on all legs (see card above)"
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}  [MUTUALLY EXCLUSIVE]\n"
+                                f"# Action: Buy NO on all mutually exclusive legs\n"
+                                f"{_legs_str}\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        elif _exec_strat == "threshold_order":
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}  [THRESHOLD ORDER]\n"
+                                f"# Action: Buy YES on lower-threshold leg + BUY NO on higher-threshold leg\n"
+                                f"# YES ask: {_ya_c_ync:.0f}¢  |  NO ask: {_na_c_ync:.0f}¢\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        elif _exec_strat == "superset":
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}  [SUPERSET]\n"
+                                f"# Action: Buy YES on superset outcome + BUY NO on subset outcome\n"
+                                f"# YES ask: {_ya_c_ync:.0f}¢  |  NO ask: {_na_c_ync:.0f}¢\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        else:
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}\n"
+                                f"# Strategy: {_exec_strat.upper()}\n"
+                                f"# YES ask: {_ya_c_ync:.0f}¢  |  NO ask: {_na_c_ync:.0f}¢\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        st.success("\U0001f680 Ready to execute — place orders on Kalshi.com")
+                        st.code(_exec_snippet, language="bash")
+                    else:
+                        st.info("Complete all checks before executing")
         except Exception:
             pass
-        # -- Copy-ready execution summary (YNC only, shown outside checklist when not all checked)
-        if _strategy == "yes_no_complement":
-            try:
-                _ync_tk   = str(_arb.get("ticker", "--")).split(" (")[0]
-                _ync_ya_c = float(_arb.get("yes_ask", 0)) * 100
-                _ync_na_c = float(_arb.get("no_ask", 0)) * 100
-                _ync_net  = float(_arb.get("net_edge_cents", 0))
-                _ync_snippet = (
-                    f"# Arb: {_ync_tk}\n"
-                    f"# Strategy: YNC\n"
-                    f"# Leg 1: BUY YES on {_ync_tk} @ {_ync_ya_c:.0f}¢\n"
-                    f"# Leg 2: BUY NO on {_ync_tk} @ {_ync_na_c:.0f}¢\n"
-                    f"# Est. net edge: +{_ync_net:.2f}¢ per contract"
-                )
-                st.code(_ync_snippet, language="bash")
-            except Exception:
-                pass
+        # YNC execution snippet suppressed — YNC detections are feed artifacts, not executable
 
     # -- CE arb cards
     if _ce_slice:
-        _section_header("COLLECTIVELY EXHAUSTIVE", "Buy YES on all legs")
+        _section_header("COLLECTIVELY EXHAUSTIVE", "Historical records only — CE scanner currently disabled")
         for _arb in _ce_slice:
             _ticker = _html.escape(str(_arb.get("ticker", "--")))
             _ya = _arb.get("yes_ask", 0)
@@ -2040,17 +2186,8 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                     st.markdown(_legs_html, unsafe_allow_html=True)
             except Exception:
                 pass
-            # -- Execution checklist per CE arb card
-            try:
-                _arb_id_ce = str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:40]
-                _net_ce_chk = float(_arb.get("net_edge_cents", 0))
-                with st.expander("Execution Checklist", expanded=False):
-                    st.checkbox("✅ Verified both legs are still tradeable", key=f"check_{_arb_id_ce}_1")
-                    st.checkbox("✅ Order size fits within available quantity", key=f"check_{_arb_id_ce}_2")
-                    st.checkbox(f"✅ Confirmed net edge after fees: +{_net_ce_chk:.2f}¢", key=f"check_{_arb_id_ce}_3")
-                    st.checkbox("✅ Verified prices in Kalshi UI before executing", key=f"check_{_arb_id_ce}_4")
-            except Exception:
-                pass
+            # CE scanner disabled — no execution checklist
+            st.caption("&#9888; CE scanner is currently disabled. This is a historical record — not currently actionable.")
 
     # -- ME / TH / SS arb cards
     import time as _time_mod3
@@ -2375,13 +2512,11 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
             height=220, xaxis_title="Net Edge (c)", yaxis_title="Count", bargap=0.05,
         ))
         st.plotly_chart(fig, use_container_width=True)
+        st.caption("Includes all strategy types (YNC feed artifacts + ME/TH actionable arbs). Use strategy filter to isolate ME/TH only.")
 
-    # Strategy info panels
+    # Strategy info panel
     st.markdown("<hr>", unsafe_allow_html=True)
-    for _strat in ["yes_no_complement", "collectively_exhaustive",
-                   "mutually_exclusive", "superset", "threshold_order"]:
-        _relationship_panel(_strat)
-        st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
+    _relationship_panel("yes_no_complement")
 
     st.markdown(
         f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};
@@ -2389,7 +2524,7 @@ padding:0.75rem 1rem;border-radius:3px;margin-top:1rem;'>
 <div style='font-size:0.62rem;letter-spacing:0.08em;color:{BLUE};
 text-transform:uppercase;margin-bottom:4px;'>DATA SOURCES</div>
 <div style='font-size:0.7rem;color:{TEXT2};line-height:1.6;'>
-Live complement arb detected from Synthesis WebSocket.
+ME / TH arbs + YNC feed artifacts detected from Synthesis WebSocket.
 Relationship data (30k market pairs) loaded from local database.
 </div>
 </div>""",
@@ -2403,7 +2538,7 @@ def _relationship_panel(strategy: str):
         "yes_no_complement": (
             "YES / NO COMPLEMENT",
             "P(YES) + P(NO) = 100c for every contract.\n"
-            "Arb exists when YES ask + NO ask < 100c (both sides tradeable simultaneously)."
+            "Structurally: live YES ask + NO ask is always ≥ 100c (bid-ask spread). Sub-100c quotes are feed/rounding artifacts only."
         ),
         "mutually_exclusive": (
             "MUTUALLY EXCLUSIVE",
@@ -2423,7 +2558,8 @@ def _relationship_panel(strategy: str):
         "collectively_exhaustive": (
             "COLLECTIVELY EXHAUSTIVE",
             "The set of outcomes covers all possible results — exactly one must occur.\n"
-            "Arb exists when the sum of YES asks < 100c (can buy all outcomes cheaply)."
+            "Arb condition: sum of YES asks < 100c (can buy all outcomes cheaply).\n"
+            "CE scanner currently disabled — historical records only, not auto-detected."
         ),
         "superset": (
             "SUPERSET RELATIONSHIP",
@@ -2451,3 +2587,4 @@ white-space:pre-line;'>
 </div>""",
         unsafe_allow_html=True,
     )
+

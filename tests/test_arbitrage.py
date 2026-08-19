@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_arbitrage.py
 Tests for arbitrage detection strategies.
 """

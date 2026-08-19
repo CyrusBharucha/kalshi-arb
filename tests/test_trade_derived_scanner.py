@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_trade_derived_scanner.py
 ===================================
 Unit tests for arbitrage/trade_derived_scanner.py (Class C detection).

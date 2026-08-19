@@ -1,4 +1,4 @@
-﻿"""
+"""
 scripts/synthesis_l2_writer.py
 ================================
 Connects to Synthesis WebSocket and snapshots the full L2 cache into

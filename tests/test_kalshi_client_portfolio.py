@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_kalshi_client_portfolio.py
 ========================================
 Unit tests for data/kalshi_client.KalshiClient — portfolio + historical endpoints:

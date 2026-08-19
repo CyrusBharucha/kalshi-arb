@@ -1,4 +1,4 @@
-"""
+﻿"""
 dashboard/data_layer.py
 =======================
 Clean data-access layer for the Streamlit dashboard.
@@ -120,7 +120,6 @@ def _db_available() -> bool:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             conn.execute(text("SELECT 1"))
         _USE_SQLITE = False
         return True
@@ -156,12 +155,103 @@ def _safe_sql(query_fn):
     return wrapper
 
 
+# -- Neon warmup: fire background threads on module load to warm the connection
+# pool and pre-populate the most expensive caches before any page query runs.
+_warmup_done = False
+
+def _warmup_neon_bg() -> None:
+    global _warmup_done
+    if _warmup_done:
+        return
+    _warmup_done = True
+    try:
+        import threading as _threading
+
+        def _prime_caches():
+            """Pre-warm the critical caches that every page render touches."""
+            import time as _time
+            _time.sleep(0.5)  # let Streamlit start before hitting DB
+
+            # Pre-init live_arb_store engine FIRST (sequentially) so parallel threads
+            # below don't race on first-connect and trigger the 30s backoff.
+            # This runs even if the analytics engine fails (was previously skipped on early return).
+            try:
+                import dashboard.live_arb_store as _las_wu
+                if not getattr(_las_wu, "_pg_ok", False):
+                    _las_wu._get_pg_engine()  # establishes connection + sets _pg_ok=True
+            except Exception:
+                pass
+
+            try:
+                # Warm analytics connection pool so parallel threads share a ready pool.
+                from database.repository import get_engine
+                from sqlalchemy import text
+                eng = get_engine()
+                with eng.connect() as c:
+                    c.execute(text("SELECT 1"))
+            except Exception:
+                pass  # analytics engine failure is non-fatal — live_arb_store may be connected
+
+            # Fire all cache-warmers in parallel so they all resolve simultaneously
+            # rather than serially (serial = last entry not ready until N × RTT).
+            _warmers = (
+                get_system_health,
+                _fetch_all_live_arbs_master,
+                get_coverage_stats,
+                lambda: get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0),
+                get_recently_closed_opps,
+                get_canadian_markets,
+                get_arb_rolling_7d,
+                get_arb_by_category,
+                get_historical_arb_stats,
+                get_arb_edge_by_strategy_class,
+                get_arb_30day_counts,
+                lambda: get_open_markets(),
+                get_canadian_historical_arb_stats,
+                get_data_quality_stats,
+                get_ext_market_daily_stats,
+                get_table_sizes,
+                lambda: get_ingestion_log(limit=100),
+                get_latest_external_prices,
+                get_relationship_stats,
+                get_research_summary,
+                get_live_market_summary,
+                get_arb_time_of_day_stats,
+                get_arb_day_of_week_stats,
+                get_arb_settlement_proximity_stats,
+                get_live_arbs_cloud_stats,
+                get_backtest_runs,
+                get_cross_asset_signals,
+                lambda: get_top_markets_by_volume(limit=20),
+                lambda: get_arb_store_recent(limit=10),
+                lambda: get_arb_drought_timestamps(hours=24),
+            )
+            threads = []
+            for _fn in _warmers:
+                def _run(fn=_fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                _t = _threading.Thread(target=_run, daemon=True)
+                _t.start()
+                threads.append(_t)
+
+        t = _threading.Thread(target=_prime_caches, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+_warmup_neon_bg()
+
+
 # -- System health --------------------------------------------------------------
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30, max_entries=1)
 def get_system_health() -> Dict[str, Any]:
     """
     Returns a dict of current system health indicators.
+    Short TTL (30s) so db_connected reflects live state quickly after cold-start.
     Safe to call even when DB is down.
     """
     health: Dict[str, Any] = {
@@ -178,61 +268,57 @@ def get_system_health() -> Dict[str, Any]:
     }
     try:
         import time
-        from sqlalchemy import create_engine, text
-        import config as _cfg
-        _test_engine = create_engine(
-            _cfg.DB_URL,
-            connect_args={"connect_timeout": 5},  # fail fast if no PostgreSQL
-            pool_pre_ping=False,
-        )
+        from sqlalchemy import text
         from database.repository import get_engine
-        engine = get_engine()
+        engine = get_engine()  # reuse warm pool — avoids Neon cold-start on every cache miss
         t0 = time.monotonic()
-        with _test_engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
-            conn.execute(text("SELECT 1"))
+        with engine.connect() as conn:
+            conn.execute(text("SET statement_timeout = '8000'"))
+            # All counts + db size in one CTE round trip
+            row = conn.execute(text("""
+                WITH
+                  m_cnt   AS (SELECT COUNT(*) AS n FROM markets),
+                  e_cnt   AS (SELECT COUNT(*) AS n FROM events),
+                  t_cnt   AS (SELECT COUNT(*) AS n FROM trades),
+                  r_cnt   AS (SELECT COUNT(*) AS n FROM contract_relationships),
+                  a_cnt   AS (SELECT COUNT(*) AS n FROM arbitrage_opportunities WHERE status='open'),
+                  snap_ts AS (SELECT MAX(snapshot_ts) AS ts FROM market_snapshots),
+                  l2_cnt  AS (SELECT COUNT(*) AS n FROM l2_snapshots),
+                  db_sz   AS (SELECT pg_size_pretty(pg_database_size(current_database())) AS sz)
+                SELECT m_cnt.n, e_cnt.n, t_cnt.n, r_cnt.n, a_cnt.n,
+                       snap_ts.ts, l2_cnt.n, db_sz.sz
+                FROM m_cnt, e_cnt, t_cnt, r_cnt, a_cnt, snap_ts, l2_cnt, db_sz
+            """)).fetchone()
             health["db_latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
             health["db_connected"] = True
-
-            def _count(table):
-                try:
-                    r = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
-                    return r.scalar()
-                except Exception:
-                    return None
-
-            health["markets_total"]           = _count("markets")
-            health["events_total"]            = _count("events")
-            health["trades_total"]            = _count("trades")
-            health["relationships_total"]     = _count("contract_relationships")
-            health["arb_opportunities_open"]  = conn.execute(
-                text("SELECT COUNT(*) FROM arbitrage_opportunities WHERE status='open'")
-            ).scalar()
-            health["latest_snapshot_ts"] = conn.execute(
-                text("SELECT MAX(snapshot_ts) FROM market_snapshots")
-            ).scalar()
-            # L2 snapshots written by scripts/synthesis_l2_writer.py
-            try:
-                health["l2_snapshots_total"] = conn.execute(
-                    text("SELECT COUNT(*) FROM l2_snapshots")
-                ).scalar()
-            except Exception:
-                health["l2_snapshots_total"] = None
-            # DB size
-            try:
-                r = conn.execute(text(
-                    "SELECT pg_size_pretty(pg_database_size(current_database()))"
-                ))
-                health["db_size_mb"] = r.scalar()
-            except Exception:
-                pass
+            if row:
+                health["markets_total"]          = row[0]
+                health["events_total"]           = row[1]
+                health["trades_total"]           = row[2]
+                health["relationships_total"]    = row[3]
+                health["arb_opportunities_open"] = row[4]
+                health["latest_snapshot_ts"]     = row[5]
+                health["l2_snapshots_total"]     = row[6]
+                health["db_size_mb"]             = row[7]
     except Exception as exc:
         health["db_error"] = str(exc)
-        # Fallback: populate from SQLite
+        # Secondary check: live_arb_store uses a separate engine pool to the same Neon DB.
+        # If _pg_ok is True, Neon IS reachable — mark db_connected True so page headers
+        # don't show SQLite during the analytics engine warm-up window.
+        try:
+            from dashboard.live_arb_store import _pg_ok as _las_pg_ok
+            if _las_pg_ok:
+                health["db_connected"] = True
+                return health  # skip SQLite fallback — Neon is confirmed live
+        except Exception:
+            pass
+        # Fallback: populate from SQLite — only set _USE_SQLITE=True if it hasn't
+        # already been confirmed False (i.e., don't override a known-good Neon session).
         global _USE_SQLITE
         if _SQLITE_PATH.exists():
             health["db_mode"] = "sqlite"
-            _USE_SQLITE = True  # signal other functions to skip PostgreSQL
+            if _USE_SQLITE is not False:  # never downgrade a confirmed-live Neon session
+                _USE_SQLITE = True  # signal other functions to skip PostgreSQL
             try:
                 c = _sqlite_conn()
                 def _sc(q):
@@ -251,7 +337,7 @@ def get_system_health() -> Dict[str, Any]:
 
 # -- Overview / coverage stats -------------------------------------------------
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=600, max_entries=1)
 def get_coverage_stats() -> Dict[str, Any]:
     """Market coverage summary for the Overview page."""
     stats: Dict[str, Any] = {
@@ -272,65 +358,45 @@ def get_coverage_stats() -> Dict[str, Any]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
-            stats["markets_monitored"] = conn.execute(
-                text("SELECT COUNT(*) FROM markets WHERE status IN ('open','active')")
-            ).scalar() or 0
-
-            stats["total_markets"] = conn.execute(
-                text("SELECT COUNT(*) FROM markets")
-            ).scalar() or 0
-
-            stats["relationships"] = conn.execute(
-                text("SELECT COUNT(*) FROM contract_relationships")
-            ).scalar() or 0
-
-            try:
-                stats["candlestick_markets"] = conn.execute(
-                    text("SELECT COUNT(DISTINCT market_id) FROM candlesticks")
-                ).scalar() or 0
-            except Exception:
-                pass
-
-            stats["canadian_markets"] = conn.execute(
-                text("SELECT COUNT(*) FROM markets m JOIN events e ON m.event_ticker=e.event_ticker WHERE m.status IN ('open','active') AND e.canadian_relevance >= 1")
-            ).scalar() or 0
-
-            stats["markets_with_relationships"] = conn.execute(
-                text("SELECT COUNT(DISTINCT market_id_1) FROM contract_relationships")
-            ).scalar() or 0
-
-            stats["markets_with_arb"] = conn.execute(
-                text("SELECT COUNT(DISTINCT markets_involved[1]) FROM arbitrage_opportunities WHERE status='open'")
-            ).scalar() or 0
-
-            # Liquid = has snapshot with both bid and ask
-            stats["markets_liquid"] = conn.execute(
-                text("""
-                    SELECT COUNT(DISTINCT s.market_id)
-                    FROM market_snapshots s
-                    JOIN (SELECT market_id, MAX(snapshot_ts) max_ts FROM market_snapshots GROUP BY market_id) latest
-                      ON s.market_id=latest.market_id AND s.snapshot_ts=latest.max_ts
-                    WHERE s.yes_bid IS NOT NULL AND s.yes_ask IS NOT NULL
-                      AND s.yes_ask > s.yes_bid
-                """)
-            ).scalar() or 0
-
-            # L2 coverage (snapshots written by scripts/synthesis_l2_writer.py)
-            try:
-                row = conn.execute(
-                    text("SELECT MIN(snapped_at), MAX(snapped_at) FROM l2_snapshots")
-                ).fetchone()
-                if row and row[0]:
-                    earliest = row[0] if hasattr(row[0], "tzinfo") else datetime.fromtimestamp(row[0], tz=timezone.utc)
-                    latest   = row[1] if hasattr(row[1], "tzinfo") else datetime.fromtimestamp(row[1], tz=timezone.utc)
-                    stats["l2_coverage_days"] = (latest - earliest).days
+            conn.execute(text("SET statement_timeout = '8000'"))
+            # All counts in one round trip
+            row = conn.execute(text("""
+                WITH
+                  m_open  AS (SELECT COUNT(*) AS n FROM markets WHERE status IN ('open','active')),
+                  m_total AS (SELECT COUNT(*) AS n FROM markets),
+                  rels    AS (SELECT COUNT(*) AS n FROM contract_relationships),
+                  rels_d  AS (SELECT COUNT(DISTINCT market_id_1) AS n FROM contract_relationships),
+                  arb_m   AS (SELECT COUNT(DISTINCT markets_involved[1]) AS n
+                               FROM arbitrage_opportunities WHERE status='open'),
+                  can_m   AS (SELECT COUNT(*) AS n FROM markets m
+                               JOIN events e ON m.event_ticker=e.event_ticker
+                               WHERE m.status IN ('open','active') AND e.canadian_relevance >= 1),
+                  liq_m   AS (SELECT COUNT(*) AS n FROM (
+                               SELECT DISTINCT ON (market_id) market_id, yes_bid, yes_ask
+                               FROM market_snapshots ORDER BY market_id, snapshot_ts DESC
+                             ) latest WHERE yes_bid IS NOT NULL AND yes_ask IS NOT NULL AND yes_ask > yes_bid),
+                  l2_s    AS (SELECT MIN(snapped_at) AS earliest, MAX(snapped_at) AS latest,
+                                     COUNT(DISTINCT market_id) AS n FROM l2_snapshots),
+                  candle  AS (SELECT COUNT(DISTINCT market_id) AS n FROM candlesticks)
+                SELECT m_open.n, m_total.n, rels.n, rels_d.n, arb_m.n, can_m.n,
+                       liq_m.n, l2_s.earliest, l2_s.latest, l2_s.n, candle.n
+                FROM m_open, m_total, rels, rels_d, arb_m, can_m, liq_m, l2_s, candle
+            """)).fetchone()
+            if row:
+                stats["markets_monitored"]       = int(row[0] or 0)
+                stats["total_markets"]           = int(row[1] or 0)
+                stats["relationships"]           = int(row[2] or 0)
+                stats["markets_with_relationships"] = int(row[3] or 0)
+                stats["markets_with_arb"]        = int(row[4] or 0)
+                stats["canadian_markets"]        = int(row[5] or 0)
+                stats["markets_liquid"]          = int(row[6] or 0)
+                if row[7]:
+                    earliest = row[7] if hasattr(row[7], "tzinfo") else datetime.fromtimestamp(row[7], tz=timezone.utc)
+                    latest_l2 = row[8] if hasattr(row[8], "tzinfo") else datetime.fromtimestamp(row[8], tz=timezone.utc)
+                    stats["l2_coverage_days"] = (latest_l2 - earliest).days
                     stats["l2_earliest_ts"]   = earliest.isoformat()
-                    stats["markets_with_l2"]  = conn.execute(
-                        text("SELECT COUNT(DISTINCT market_id) FROM l2_snapshots")
-                    ).scalar() or 0
-            except Exception:
-                pass
+                    stats["markets_with_l2"]  = int(row[9] or 0)
+                stats["candlestick_markets"] = int(row[10] or 0)
 
     except Exception as exc:
         logger.warning("get_coverage_stats failed: %s", exc)
@@ -372,7 +438,7 @@ def get_coverage_stats() -> Dict[str, Any]:
 
 # -- Open markets --------------------------------------------------------------
 
-@st.cache_data(ttl=60, max_entries=2)
+@st.cache_data(ttl=600, max_entries=2)
 def get_open_markets(
     status_filter: str = "open",
     category_filter: Optional[str] = None,
@@ -407,6 +473,12 @@ def get_open_markets(
         where = " AND ".join(filters)
 
         sql = text(f"""
+            WITH latest_snaps AS (
+                SELECT DISTINCT ON (market_id)
+                    market_id, yes_bid, yes_ask, last_price, volume, open_interest, snapshot_ts
+                FROM market_snapshots
+                ORDER BY market_id, snapshot_ts DESC
+            )
             SELECT
                 m.ticker,
                 m.event_ticker,
@@ -426,12 +498,7 @@ def get_open_markets(
                 CASE WHEN ao.ticker IS NOT NULL THEN TRUE ELSE FALSE END AS has_arb
             FROM markets m
             JOIN events e ON m.event_ticker = e.event_ticker
-            LEFT JOIN LATERAL (
-                SELECT yes_bid, yes_ask, last_price, volume, open_interest, snapshot_ts
-                FROM market_snapshots
-                WHERE market_id = m.market_id
-                ORDER BY snapshot_ts DESC LIMIT 1
-            ) s ON TRUE
+            LEFT JOIN latest_snaps s ON m.market_id = s.market_id
             LEFT JOIN (
                 SELECT market_id_1 AS mid, COUNT(*) AS rel_count
                 FROM contract_relationships
@@ -448,7 +515,6 @@ def get_open_markets(
         """)
 
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(sql, conn, params=params)
         return df, None
     except Exception as exc:
@@ -505,7 +571,8 @@ def _sqlite_arb_fallback(
                 continue
             c = _sqlite3.connect(str(_sp), check_same_thread=False)
             _q = ("SELECT * FROM arbitrage_opportunities "
-                  "WHERE CAST(net_edge AS REAL) >= ?")
+                  "WHERE CAST(net_edge AS REAL) >= ?"
+                  " AND strategy_type != 'collectively_exhaustive'")
             _params: list = [min_net_edge_cents / 100.0]
             if strategy:
                 _q += " AND strategy_type = ?"; _params.append(strategy)
@@ -550,39 +617,15 @@ def _sqlite_arb_fallback(
     return pd.DataFrame(), "SQLite fallback: no data found"
 
 
-@st.cache_data(ttl=30)
-def get_live_arb_opportunities(
-    strategy: Optional[str] = None,
-    min_net_edge_cents: float = 0.0,
-    min_qty: int = 1,
-    canadian_only: bool = False,
-) -> Tuple[pd.DataFrame, Optional[str]]:
-    # Fast path: skip PostgreSQL when SQLite is available and PG hasn't been confirmed working.
-    # _USE_SQLITE=None means "not probed yet" — if SQLite exists we prefer it over a slow
-    # PG connection attempt that will fail on Streamlit Cloud.
-    if _USE_SQLITE is True and _SQLITE_PATH.exists():
-        return _sqlite_arb_fallback(min_net_edge_cents, min_qty, strategy, canadian_only)
+@st.cache_data(ttl=300, max_entries=1)
+def _fetch_all_live_arbs_master() -> Tuple[pd.DataFrame, Optional[str]]:
+    """Single master fetch of ALL open (non-CE) arbs — one Neon round-trip per TTL window.
+    get_live_arb_opportunities filters this in Python; never call this directly from pages."""
     try:
         from database.repository import get_engine
         from sqlalchemy import text
         engine = get_engine()
-
-        params: Dict[str, Any] = {
-            "min_edge": min_net_edge_cents / 100.0,
-            "min_qty":  min_qty,
-        }
-        filters = [
-            "a.status = 'open'",
-            "a.net_edge >= :min_edge",
-            "(a.max_executable_contracts IS NULL OR a.max_executable_contracts >= :min_qty)",
-            "a.strategy_type != 'collectively_exhaustive'",
-        ]
-        if strategy:
-            filters.append("a.strategy_type = :strategy")
-            params["strategy"] = strategy
-        where = " AND ".join(filters)
-
-        sql = text(f"""
+        sql = text("""
             SELECT
                 a.opportunity_id,
                 a.detected_at,
@@ -596,21 +639,13 @@ def get_live_arb_opportunities(
                 (a.max_net_profit)::numeric(8,4)     AS max_net_profit,
                 EXTRACT(EPOCH FROM (NOW() - a.detected_at))::int AS age_seconds
             FROM arbitrage_opportunities a
-            WHERE {where}
+            WHERE a.status = 'open'
+              AND a.strategy_type != 'collectively_exhaustive'
             ORDER BY a.net_edge DESC NULLS LAST
-            LIMIT 500
+            LIMIT 1000
         """)
-
         with engine.connect() as conn:
-            # Fail fast (5 s) so the page doesn't hang when Neon is slow.
-            conn.execute(text("SET statement_timeout = '5000'"))
-            df = pd.read_sql(sql, conn, params=params)
-
-            # Only fall back to SQLite if PG is genuinely empty (no rows at all in the
-            # table), not just because the current query returned zero arbs.  An empty
-            # query result when PG is connected means there are legitimately no open arbs
-            # right now — do not surface stale SQLite data as if it were live.
-            # NOTE: conn must be used inside the `with` block — it is closed on exit.
+            df = pd.read_sql(sql, conn)
             if df.empty and _SQLITE_PATH.exists():
                 try:
                     _pg_total = pd.read_sql(
@@ -621,33 +656,53 @@ def get_live_arb_opportunities(
                 except RuntimeError:
                     raise
                 except Exception:
-                    pass  # PG count failed — trust the empty df, don't fall back
+                    pass
+        global _USE_SQLITE
+        _USE_SQLITE = False
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
 
-        # Sports filter: exclude arbs where all involved markets are sports tickers
-        if not df.empty and "markets_involved" in df.columns:
-            _SPORTS_PFX_SET = _SPORTS_PFX_DL if "_SPORTS_PFX_DL" in dir() else (
-                "KXLIGA", "KXLALIGA", "KXNBA", "KXNFL", "KXMLB", "KXNHL",
-                "KXEPL", "KXSERIEA", "KXBUNDES", "KXMLS", "KXUCL", "KXUEFA",
-                "KXNCAAF", "KXNCAAB", "KXWNBA", "KXPGA", "KXTENNIS", "KXFORMULA",
-                "KXSOCCER", "KXCRICKET", "KXRUGBY", "KXGOLF", "KXUFC", "KXBOXING", "KXMMA",
-            )
+
+def get_live_arb_opportunities(
+    strategy: Optional[str] = None,
+    min_net_edge_cents: float = 0.0,
+    min_qty: int = 1,
+    canadian_only: bool = False,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    # Fast path: SQLite fallback when Neon is unreachable
+    if _USE_SQLITE is True and _SQLITE_PATH.exists():
+        return _sqlite_arb_fallback(min_net_edge_cents, min_qty, strategy, canadian_only)
+
+    df, err = _fetch_all_live_arbs_master()
+    if df.empty and err:
+        return _sqlite_arb_fallback(min_net_edge_cents, min_qty, strategy, canadian_only)
+
+    # Python-level filters (avoids separate Neon round trips per filter combo)
+    if not df.empty:
+        if min_net_edge_cents > 0:
+            df = df[df["net_edge_cents"] >= min_net_edge_cents]
+        if min_qty > 1:
+            df = df[df["qty"].isna() | (df["qty"] >= min_qty)]
+        if strategy:
+            df = df[df["strategy_type"] == strategy]
+
+        # Sports filter
+        if "markets_involved" in df.columns:
             def _is_sports_row(mkts):
                 if not mkts:
                     return False
                 tickers = mkts if isinstance(mkts, list) else [str(mkts)]
-                return all(any(str(t).upper().startswith(p) for p in _SPORTS_PFX_SET) for t in tickers)
+                return all(any(str(t).upper().startswith(p) for p in _SPORTS_PFX_DL) for t in tickers)
             df = df[~df["markets_involved"].apply(_is_sports_row)]
 
-        # Threshold filter: remove P\d+/A\d+/T\d+ false-positive CE arbs (pre-Gate-3d legacy)
+        # Threshold filter: remove P\d+/A\d+/T\d+ false-positive CE arbs
         df = _filter_threshold_arbs(df, col="markets_involved")
 
-        # Canadian filter: check if any involved market is Canadian
-        if canadian_only and not df.empty and "markets_involved" in df.columns:
+        if canadian_only and "markets_involved" in df.columns:
             df = _filter_canadian_opps(df)
 
-        return df, None
-    except Exception as exc:
-        return _sqlite_arb_fallback(min_net_edge_cents, min_qty, strategy, canadian_only)
+    return df, None
 
 
 # Maps UI category labels (lowercase) → Kalshi ticker prefix patterns for SQLite filtering.
@@ -838,7 +893,7 @@ def _filter_canadian_opps(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask]
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=600, max_entries=1)
 def get_recently_closed_opps(hours: int = 1) -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Fetch arbitrage opportunities that closed (status != 'open') within the
@@ -871,12 +926,13 @@ def get_recently_closed_opps(hours: int = 1) -> Tuple[pd.DataFrame, Optional[str
             FROM arbitrage_opportunities a
             WHERE a.status != 'open'
               AND a.detected_at >= :since
+              AND a.strategy_type != 'collectively_exhaustive'
             ORDER BY a.closed_at DESC NULLS FIRST
             LIMIT 100
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(sql, conn, params={"since": since})
+        df = _filter_threshold_arbs(df, col="markets_involved")
         return df, None
     except Exception as exc:
         if _SQLITE_PATH.exists():
@@ -884,7 +940,8 @@ def get_recently_closed_opps(hours: int = 1) -> Tuple[pd.DataFrame, Optional[str
                 c = _sqlite_conn()
                 df = pd.read_sql_query(
                     "SELECT * FROM arbitrage_opportunities WHERE status != 'open' "
-                    "AND detected_at >= ? ORDER BY detected_at DESC LIMIT 50",
+                    "AND detected_at >= ? AND strategy_type != 'collectively_exhaustive'"
+                    " ORDER BY detected_at DESC LIMIT 50",
                     c,
                     params=(since.isoformat(),),
                 )
@@ -896,6 +953,7 @@ def get_recently_closed_opps(hours: int = 1) -> Tuple[pd.DataFrame, Optional[str
         return pd.DataFrame(), str(exc)
 
 
+@st.cache_data(ttl=300, max_entries=20)
 def get_opportunity_detail(opportunity_id: str) -> Tuple[Dict, Optional[str]]:
     """Fetch full detail for one arbitrage opportunity."""
     try:
@@ -915,7 +973,6 @@ def get_opportunity_detail(opportunity_id: str) -> Tuple[Dict, Optional[str]]:
             WHERE a.opportunity_id = :oid
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             row = conn.execute(sql, {"oid": opportunity_id}).fetchone()
         if row is None:
             return {}, "Opportunity not found"
@@ -957,7 +1014,6 @@ def get_live_orderbook(ticker: str) -> Tuple[Dict, Optional[str]]:
             ORDER BY s.snapshot_ts DESC LIMIT 1
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             row = conn.execute(sql, {"ticker": ticker}).fetchone()
         if row:
             d = dict(row._mapping)
@@ -978,7 +1034,7 @@ def get_live_orderbook(ticker: str) -> Tuple[Dict, Optional[str]]:
 
 # -- Historical arbitrage ------------------------------------------------------
 
-@st.cache_data(ttl=120, max_entries=2)
+@st.cache_data(ttl=600, max_entries=2)
 def get_historical_arb_summary(
     strategy: Optional[str] = None,
     classification: Optional[str] = None,
@@ -993,13 +1049,13 @@ def get_historical_arb_summary(
         start = datetime.now(timezone.utc) - timedelta(days=days_back)
         from sqlalchemy import text
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             # Use repository function but re-implement to avoid session complexity
             params: Dict[str, Any] = {
                 "min_edge": min_net_edge_cents / 100.0,
                 "start": start,
             }
-            filters = ["a.net_edge >= :min_edge", "a.detected_at >= :start"]
+            filters = ["a.net_edge >= :min_edge", "a.detected_at >= :start",
+                       "a.strategy_type != 'collectively_exhaustive'"]
             if strategy:
                 filters.append("a.strategy_type = :strategy")
                 params["strategy"] = strategy
@@ -1053,7 +1109,8 @@ def get_historical_arb_summary(
                 # Use date-only prefix to avoid timezone suffix comparison issues
                 start_str = start.strftime("%Y-%m-%d")
                 q = ("SELECT * FROM arbitrage_opportunities "
-                     "WHERE substr(detected_at,1,10) >= ? AND CAST(net_edge AS REAL) >= ?")
+                     "WHERE substr(detected_at,1,10) >= ? AND CAST(net_edge AS REAL) >= ?"
+                     " AND strategy_type != 'collectively_exhaustive'")
                 params_sq: list = [start_str, min_net_edge_cents / 100.0]
                 if strategy:
                     q += " AND strategy_type = ?"
@@ -1089,7 +1146,6 @@ def get_historical_arb_summary(
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=30, max_entries=4)  # 30s TTL — history page is not real-time, avoids Neon round-trip on every widget
 def get_live_arb_history(
     days_back: int = 90,
     strategy: Optional[str] = None,
@@ -1140,7 +1196,7 @@ def get_live_arb_history(
     return df
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600, max_entries=1)
 def get_historical_arb_stats() -> Dict[str, Any]:
     """Aggregate stats for the historical arb page KPI row."""
     try:
@@ -1149,7 +1205,6 @@ def get_historical_arb_stats() -> Dict[str, Any]:
         engine = get_engine()
 
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             r = conn.execute(text("""
                 SELECT
                     COUNT(*)                              AS total_opps,
@@ -1162,6 +1217,7 @@ def get_historical_arb_stats() -> Dict[str, Any]:
                     MAX(detected_at)                     AS latest
                 FROM arbitrage_opportunities
                 WHERE net_edge > 0
+                  AND strategy_type != 'collectively_exhaustive'
             """)).fetchone()
         if r:
             row = dict(r._mapping)
@@ -1195,6 +1251,7 @@ def get_historical_arb_stats() -> Dict[str, Any]:
                            detected_at
                     FROM arbitrage_opportunities
                     WHERE CAST(net_edge AS REAL) > 0
+                      AND strategy_type != 'collectively_exhaustive'
                 """, c)
                 c.close()
                 if not raw.empty:
@@ -1212,12 +1269,37 @@ def get_historical_arb_stats() -> Dict[str, Any]:
                     }
             except Exception:
                 pass
+    # Neon fallback: use live_arbs_cloud for stats
+    try:
+        import dashboard.live_arb_store as _las_dl_01
+        from sqlalchemy import text as _hstat_text
+        _engine_hs = getattr(_las_dl_01, "_pg_engine", None) or _las_dl_01.get_pg_engine_cached()
+        if _engine_hs is not None:
+            with _engine_hs.connect() as _conn_hs:
+                _row_hs = _conn_hs.execute(_hstat_text(
+                    "SELECT COUNT(*), AVG(net_edge_cents), MAX(net_edge_cents), "
+                    "MIN(detected_at), MAX(detected_at) "
+                    "FROM live_arbs_cloud WHERE strategy_type != 'collectively_exhaustive'"
+                )).fetchone()
+            if _row_hs and _row_hs[0]:
+                return {
+                    "total_opportunities":      int(_row_hs[0] or 0),
+                    "executable_opportunities": 0,
+                    "median_edge_cents":        float(_row_hs[1] or 0),
+                    "mean_edge_cents":          float(_row_hs[1] or 0),
+                    "max_edge_cents":           float(_row_hs[2] or 0),
+                    "median_lifetime_s":        0.0,
+                    "date_earliest":            _row_hs[3],
+                    "date_latest":              _row_hs[4],
+                }
+    except Exception:
+        pass
     return {}
 
 
 # -- Backtest ------------------------------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=1)
 def get_backtest_runs() -> Tuple[pd.DataFrame, Optional[str]]:
     try:
         from database.repository import get_engine
@@ -1239,14 +1321,13 @@ def get_backtest_runs() -> Tuple[pd.DataFrame, Optional[str]]:
             LIMIT 50
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(sql, conn)
         return df, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600, max_entries=4)
 def get_backtest_trades(run_id: str) -> Tuple[pd.DataFrame, Optional[str]]:
     try:
         from database.repository import get_engine, get_backtest_performance
@@ -1261,7 +1342,6 @@ def get_backtest_trades(run_id: str) -> Tuple[pd.DataFrame, Optional[str]]:
             ORDER BY bt.entry_ts
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(sql, conn, params={"run_id": run_id})
         return df, None
     except Exception as exc:
@@ -1270,7 +1350,7 @@ def get_backtest_trades(run_id: str) -> Tuple[pd.DataFrame, Optional[str]]:
 
 # -- Cross-asset ----------------------------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=10)
 def get_cross_asset_data(
     market_id: str,
     asset: str,
@@ -1296,7 +1376,6 @@ def get_cross_asset_data(
             ORDER BY cs.spread_ts
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(sql, conn, params={
                 "market_id": market_id, "asset": asset, "start": start
             })
@@ -1305,7 +1384,7 @@ def get_cross_asset_data(
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=1)
 def get_cross_asset_signals() -> Tuple[pd.DataFrame, Optional[str]]:
     """Read cross_asset_model_spreads from SQLite — returns real BOC/FX signals."""
     try:
@@ -1324,7 +1403,7 @@ def get_cross_asset_signals() -> Tuple[pd.DataFrame, Optional[str]]:
 
 # -- Canadian markets ----------------------------------------------------------
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600, max_entries=1)
 def get_canadian_markets() -> Tuple[pd.DataFrame, Optional[str]]:
     try:
         from database.repository import get_engine
@@ -1332,6 +1411,12 @@ def get_canadian_markets() -> Tuple[pd.DataFrame, Optional[str]]:
         engine = get_engine()
 
         sql = text("""
+            WITH latest_snaps AS (
+                SELECT DISTINCT ON (market_id)
+                    market_id, yes_bid, yes_ask, last_price, volume, open_interest, snapshot_ts
+                FROM market_snapshots
+                ORDER BY market_id, snapshot_ts DESC
+            )
             SELECT
                 m.ticker,
                 m.event_ticker,
@@ -1349,18 +1434,12 @@ def get_canadian_markets() -> Tuple[pd.DataFrame, Optional[str]]:
                 s.snapshot_ts AS last_update
             FROM markets m
             JOIN events e ON m.event_ticker = e.event_ticker
-            LEFT JOIN LATERAL (
-                SELECT yes_bid, yes_ask, last_price, volume, open_interest, snapshot_ts
-                FROM market_snapshots
-                WHERE market_id = m.market_id
-                ORDER BY snapshot_ts DESC LIMIT 1
-            ) s ON TRUE
+            LEFT JOIN latest_snaps s ON m.market_id = s.market_id
             WHERE e.canadian_relevance >= 1
               AND m.status IN ('open','active')
             ORDER BY e.canadian_relevance DESC, COALESCE(s.volume, 0) DESC NULLS LAST
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(sql, conn)
         return df, None
     except Exception as exc:
@@ -1390,7 +1469,7 @@ def get_canadian_markets() -> Tuple[pd.DataFrame, Optional[str]]:
 
 # -- Canadian historical arb stats ----------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=1)
 def get_canadian_historical_arb_stats() -> Dict[str, Any]:
     """
     Aggregate stats for historical arb opportunities involving Canadian markets.
@@ -1406,7 +1485,6 @@ def get_canadian_historical_arb_stats() -> Dict[str, Any]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             r = conn.execute(text("""
                 WITH canadian_mids AS (
                     SELECT DISTINCT m.market_id
@@ -1428,6 +1506,7 @@ def get_canadian_historical_arb_stats() -> Dict[str, Any]:
                     )                                     AS median_lifetime_s
                 FROM arbitrage_opportunities a
                 WHERE a.net_edge > 0
+                  AND a.strategy_type != 'collectively_exhaustive'
                   AND EXISTS (
                       SELECT 1 FROM canadian_mids cm
                       WHERE cm.market_id = ANY(a.markets_involved)
@@ -1457,6 +1536,7 @@ def get_canadian_historical_arb_stats() -> Dict[str, Any]:
                         AVG({_dur2}) AS avg_lifetime_s
                     FROM arbitrage_opportunities
                     WHERE CAST(net_edge AS REAL) > 0
+                      AND strategy_type != 'collectively_exhaustive'
                       AND (
                         markets_involved LIKE '%KXBOC%'
                         OR markets_involved LIKE '%KXCAD%'
@@ -1477,19 +1557,39 @@ def get_canadian_historical_arb_stats() -> Dict[str, Any]:
             except Exception:
                 pass
         stats["error"] = str(exc)
+        # Neon fallback: filter live_arbs_cloud by Canadian ticker prefixes
+        try:
+            import dashboard.live_arb_store as _las_dl_02
+            from sqlalchemy import text as _can_text
+            _can_engine = getattr(_las_dl_02, "_pg_engine", None) or _las_dl_02.get_pg_engine_cached()
+            if _can_engine is not None:
+                with _can_engine.connect() as _can_conn:
+                    _can_row = _can_conn.execute(_can_text(
+                        "SELECT COUNT(*), AVG(net_edge_cents), MAX(net_edge_cents) "
+                        "FROM live_arbs_cloud WHERE net_edge_cents > 0 "
+                        "AND strategy_type != 'collectively_exhaustive' "
+                        "AND (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXCAD%' "
+                        "OR ticker LIKE '%BOC%' OR ticker LIKE '%CORRA%')"
+                    )).fetchone()
+                if _can_row and _can_row[0]:
+                    stats["total_opps"]       = int(_can_row[0] or 0)
+                    stats["median_edge_cents"] = float(_can_row[1] or 0)
+                    stats["max_edge_cents"]   = float(_can_row[2] or 0)
+                    stats["error"] = None
+        except Exception:
+            pass
     return stats
 
 
 # -- Relationship stats ---------------------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=1)
 def get_relationship_stats() -> Dict[str, Any]:
     try:
         from database.repository import get_engine
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             r = conn.execute(text("""
                 SELECT
                     relationship_type,
@@ -1517,7 +1617,7 @@ def get_relationship_stats() -> Dict[str, Any]:
 
 # -- Research / empirical stats -------------------------------------------------
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, max_entries=1)
 def get_research_summary() -> Dict[str, Any]:
     """Aggregate empirical research findings."""
     stats: Dict[str, Any] = {}
@@ -1526,41 +1626,63 @@ def get_research_summary() -> Dict[str, Any]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
-            # Relationship breakdown
-            r = conn.execute(text("""
-                SELECT relationship_type, COUNT(*) FROM contract_relationships
-                GROUP BY relationship_type
+            conn.execute(text("SET statement_timeout = '8000'"))
+            # All stats in one CTE round trip: relationship breakdown + arb stats
+            rows = conn.execute(text("""
+                WITH
+                  rels  AS (
+                    SELECT relationship_type, COUNT(*) AS n
+                    FROM contract_relationships
+                    GROUP BY relationship_type
+                  ),
+                  strat AS (
+                    SELECT strategy_type, classification,
+                           COUNT(*) AS n,
+                           AVG(net_edge)*100 AS avg_e,
+                           MAX(net_edge)*100 AS max_e
+                    FROM arbitrage_opportunities WHERE net_edge > 0
+                      AND strategy_type != 'collectively_exhaustive'
+                    GROUP BY strategy_type, classification
+                    ORDER BY n DESC
+                  ),
+                  ca AS (SELECT COUNT(*) AS n FROM arbitrage_opportunities
+                         WHERE classification = 'A' AND net_edge > 0
+                           AND strategy_type != 'collectively_exhaustive'),
+                  cb AS (SELECT COUNT(*) AS n FROM arbitrage_opportunities
+                         WHERE classification = 'B'
+                           AND strategy_type != 'collectively_exhaustive')
+                SELECT 'rel'   AS kind, relationship_type AS col1, NULL AS col2,
+                        n, NULL AS avg_e, NULL AS max_e, NULL AS scalar_n
+                FROM rels
+                UNION ALL
+                SELECT 'strat', strategy_type, classification,
+                        n, avg_e, max_e, NULL
+                FROM strat
+                UNION ALL
+                SELECT 'ca', NULL, NULL, NULL, NULL, NULL, ca.n FROM ca
+                UNION ALL
+                SELECT 'cb', NULL, NULL, NULL, NULL, NULL, cb.n FROM cb
             """)).fetchall()
-            stats["relationships_by_type"] = {row[0]: row[1] for row in r}
 
-            # Arb opportunity breakdown
-            r2 = conn.execute(text("""
-                SELECT strategy_type, classification, COUNT(*),
-                       AVG(net_edge)*100, MAX(net_edge)*100
-                FROM arbitrage_opportunities
-                WHERE net_edge > 0
-                GROUP BY strategy_type, classification
-                ORDER BY COUNT(*) DESC
-            """)).fetchall()
-            stats["arb_by_strategy"] = [
-                {"strategy": row[0], "class": row[1], "count": row[2],
-                 "avg_edge_cents": float(row[3] or 0), "max_edge_cents": float(row[4] or 0)}
-                for row in r2
-            ]
-
-            # Detected violations
-            r3 = conn.execute(text("""
-                SELECT COUNT(*) FROM arbitrage_opportunities
-                WHERE classification = 'A' AND net_edge > 0
-            """)).scalar()
-            stats["class_a_violations"] = r3 or 0
-
-            # Data quality
-            r4 = conn.execute(text(
-                "SELECT COUNT(*) FROM arbitrage_opportunities WHERE classification='B'"
-            )).scalar()
-            stats["class_b_opportunities"] = r4 or 0
+            arb_by_strategy = []
+            rels_by_type: Dict[str, int] = {}
+            for row in rows:
+                kind = row[0]
+                if kind == "rel":
+                    rels_by_type[row[1]] = int(row[3] or 0)
+                elif kind == "strat":
+                    arb_by_strategy.append({
+                        "strategy": row[1], "class": row[2], "count": int(row[3] or 0),
+                        "avg_edge_cents": float(row[4] or 0), "max_edge_cents": float(row[5] or 0),
+                    })
+                elif kind == "ca":
+                    stats["class_a_violations"] = int(row[6] or 0)
+                elif kind == "cb":
+                    stats["class_b_opportunities"] = int(row[6] or 0)
+            stats["relationships_by_type"] = rels_by_type
+            stats["arb_by_strategy"] = arb_by_strategy
+            stats.setdefault("class_a_violations", 0)
+            stats.setdefault("class_b_opportunities", 0)
 
     except Exception as exc:
         stats["error"] = str(exc)
@@ -1571,6 +1693,7 @@ def get_research_summary() -> Dict[str, Any]:
                     SELECT strategy_type, classification, COUNT(*),
                            AVG(CAST(net_edge AS REAL))*100, MAX(CAST(net_edge AS REAL))*100
                     FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0
+                      AND strategy_type != 'collectively_exhaustive'
                     GROUP BY strategy_type, classification ORDER BY COUNT(*) DESC
                 """).fetchall()
                 stats["arb_by_strategy"] = [
@@ -1578,9 +1701,9 @@ def get_research_summary() -> Dict[str, Any]:
                      "avg_edge_cents": float(r[3] or 0), "max_edge_cents": float(r[4] or 0)}
                     for r in r2
                 ]
-                r3 = c.execute("SELECT COUNT(*) FROM arbitrage_opportunities WHERE classification='A' AND CAST(net_edge AS REAL) > 0").fetchone()
+                r3 = c.execute("SELECT COUNT(*) FROM arbitrage_opportunities WHERE classification='A' AND CAST(net_edge AS REAL) > 0 AND strategy_type != 'collectively_exhaustive'").fetchone()
                 stats["class_a_violations"] = int(r3[0] or 0) if r3 else 0
-                r4 = c.execute("SELECT COUNT(*) FROM arbitrage_opportunities WHERE classification='B'").fetchone()
+                r4 = c.execute("SELECT COUNT(*) FROM arbitrage_opportunities WHERE classification='B' AND strategy_type != 'collectively_exhaustive'").fetchone()
                 stats["class_b_opportunities"] = int(r4[0] or 0) if r4 else 0
                 # Relationship breakdown
                 rr = c.execute("SELECT relationship_type, COUNT(*) FROM contract_relationships GROUP BY relationship_type").fetchall()
@@ -1588,6 +1711,32 @@ def get_research_summary() -> Dict[str, Any]:
                 stats.pop("error", None)
                 c.close()
             except Exception: pass
+        # Neon fallback: arb_by_strategy from live_arbs_cloud
+        if "arb_by_strategy" not in stats or not stats.get("arb_by_strategy"):
+            try:
+                import dashboard.live_arb_store as _las_dl_03
+                from sqlalchemy import text as _rs_text
+                _rs_eng = getattr(_las_dl_03, "_pg_engine", None) or _las_dl_03.get_pg_engine_cached()
+                if _rs_eng is not None:
+                    with _rs_eng.connect() as _rs_conn:
+                        _rs_rows = _rs_conn.execute(_rs_text(
+                            "SELECT strategy_type, COUNT(*), AVG(net_edge_cents), MAX(net_edge_cents) "
+                            "FROM live_arbs_cloud WHERE net_edge_cents > 0 "
+                            "AND strategy_type != 'collectively_exhaustive' "
+                            "GROUP BY strategy_type ORDER BY COUNT(*) DESC"
+                        )).fetchall()
+                    if _rs_rows:
+                        stats["arb_by_strategy"] = [
+                            {"strategy": r[0], "class": "A", "count": int(r[1] or 0),
+                             "avg_edge_cents": float(r[2] or 0), "max_edge_cents": float(r[3] or 0)}
+                            for r in _rs_rows
+                        ]
+                        stats.setdefault("class_a_violations", 0)
+                        stats.setdefault("class_b_opportunities", 0)
+                        stats.setdefault("relationships_by_type", {})
+                        stats.pop("error", None)
+            except Exception:
+                pass
     return stats
 
 
@@ -1676,7 +1825,7 @@ def purge_prefixarbs(dry_run: bool = True) -> dict:
 
 # -- Data quality (system page) -------------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=1)
 def get_data_quality_stats() -> Dict[str, Any]:
     """
     Run data quality diagnostics (from database/analytics.sql).
@@ -1697,66 +1846,37 @@ def get_data_quality_stats() -> Dict[str, Any]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
-            # Crossed books (bid > ask in l2_snapshots top-of-book)
-            try:
-                r = conn.execute(text("""
-                    SELECT COUNT(*) FROM l2_snapshots
-                    WHERE yes_best_bid IS NOT NULL AND yes_best_ask IS NOT NULL
-                      AND yes_best_bid > yes_best_ask
-                """)).scalar()
-                stats["crossed_books"] = int(r or 0)
-            except Exception:
-                pass
-
-            # Impossible prices in trades (price outside [0, 1] or qty < 0)
-            try:
-                r2 = conn.execute(text("""
-                    SELECT COUNT(*) FROM trades
-                    WHERE price < 0 OR price > 1 OR quantity < 0
-                """)).scalar()
-                stats["impossible_prices"] = int(r2 or 0)
-            except Exception:
-                pass
-
-            # Duplicate trades (same market/ts/price/qty/side)
-            try:
-                r3 = conn.execute(text("""
-                    SELECT COUNT(*) FROM (
-                        SELECT market_id, trade_ts, price, quantity, taker_side
-                        FROM trades
-                        GROUP BY market_id, trade_ts, price, quantity, taker_side
-                        HAVING COUNT(*) > 1
-                    ) dups
-                """)).scalar()
-                stats["duplicate_trades"] = int(r3 or 0)
-            except Exception:
-                pass
-
-            # Orphan relationships (FK to market that no longer exists)
-            try:
-                r4 = conn.execute(text("""
-                    SELECT COUNT(*) FROM contract_relationships cr
-                    LEFT JOIN markets m1 ON m1.market_id = cr.market_id_1
-                    LEFT JOIN markets m2 ON m2.market_id = cr.market_id_2
-                    WHERE m1.market_id IS NULL OR m2.market_id IS NULL
-                """)).scalar()
-                stats["orphan_relationships"] = int(r4 or 0)
-            except Exception:
-                pass
-
-            # Ingestion health: rows inserted in last 24h
-            try:
-                r5 = conn.execute(text("""
-                    SELECT COUNT(*) AS runs, SUM(rows_inserted) AS rows
-                    FROM ingestion_log
-                    WHERE run_ts >= NOW() - INTERVAL '24 hours'
-                """)).fetchone()
-                if r5:
-                    stats["ingestion_runs_24h"] = int(r5[0] or 0)
-                    stats["ingestion_rows_24h"] = int(r5[1] or 0)
-            except Exception:
-                pass
+            # All 5 diagnostics in one round trip
+            row = conn.execute(text("""
+                WITH
+                  cb  AS (SELECT COUNT(*) AS n FROM l2_snapshots
+                          WHERE yes_best_bid IS NOT NULL AND yes_best_ask IS NOT NULL
+                            AND yes_best_bid > yes_best_ask),
+                  ip  AS (SELECT COUNT(*) AS n FROM trades
+                          WHERE price < 0 OR price > 1 OR quantity < 0),
+                  dt  AS (SELECT COUNT(*) AS n FROM (
+                              SELECT market_id, trade_ts, price, quantity, taker_side
+                              FROM trades
+                              GROUP BY market_id, trade_ts, price, quantity, taker_side
+                              HAVING COUNT(*) > 1
+                          ) dups),
+                  or_ AS (SELECT COUNT(*) AS n FROM contract_relationships cr
+                          LEFT JOIN markets m1 ON m1.market_id = cr.market_id_1
+                          LEFT JOIN markets m2 ON m2.market_id = cr.market_id_2
+                          WHERE m1.market_id IS NULL OR m2.market_id IS NULL),
+                  il  AS (SELECT COUNT(*) AS runs, COALESCE(SUM(rows_inserted),0) AS rows
+                          FROM ingestion_log
+                          WHERE run_ts >= NOW() - INTERVAL '24 hours')
+                SELECT cb.n, ip.n, dt.n, or_.n, il.runs, il.rows
+                FROM cb, ip, dt, or_, il
+            """)).fetchone()
+            if row:
+                stats["crossed_books"]        = int(row[0] or 0)
+                stats["impossible_prices"]    = int(row[1] or 0)
+                stats["duplicate_trades"]     = int(row[2] or 0)
+                stats["orphan_relationships"] = int(row[3] or 0)
+                stats["ingestion_runs_24h"]   = int(row[4] or 0)
+                stats["ingestion_rows_24h"]   = int(row[5] or 0)
 
     except Exception as exc:
         stats["error"] = str(exc)
@@ -1799,7 +1919,7 @@ def get_data_quality_stats() -> Dict[str, Any]:
     return stats
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, max_entries=2)
 def get_ingestion_log(limit: int = 100) -> Tuple[pd.DataFrame, Optional[str]]:
     """Last N ingestion log rows for the system monitoring page."""
     try:
@@ -1807,7 +1927,6 @@ def get_ingestion_log(limit: int = 100) -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 SELECT job_type, target, rows_inserted, rows_skipped,
                        status, error_message, run_ts
@@ -1890,12 +2009,39 @@ def get_top_markets_by_volume(limit: int = 25) -> Tuple[pd.DataFrame, Optional[s
                 return df, None
         except Exception:
             pass
+        # Neon fallback: top arb tickers by detection frequency from live_arbs_cloud
+        try:
+            import dashboard.live_arb_store as _las_dl_04
+            from sqlalchemy import text as _vol_text
+            _vol_eng = getattr(_las_dl_04, "_pg_engine", None) or _las_dl_04.get_pg_engine_cached()
+            if _vol_eng is not None:
+                with _vol_eng.connect() as _vol_conn:
+                    _vol_rows = _vol_conn.execute(_vol_text(
+                        "SELECT ticker, COUNT(*) AS total_volume, AVG(net_edge_cents) AS avg_price, "
+                        "MIN(detected_at)::text AS first_candle, MAX(detected_at)::text AS last_candle "
+                        "FROM live_arbs_cloud WHERE strategy_type != 'collectively_exhaustive' "
+                        f"GROUP BY ticker ORDER BY total_volume DESC LIMIT {int(limit)}"
+                    )).fetchall()
+                if _vol_rows:
+                    import pandas as _pd_vol
+                    _vol_df = _pd_vol.DataFrame(
+                        _vol_rows,
+                        columns=["ticker", "total_volume", "avg_price", "first_candle", "last_candle"]
+                    )
+                    _vol_df["title"] = ""
+                    _vol_df["category"] = _vol_df["ticker"].apply(_infer_category)
+                    _vol_df["candle_count"] = _vol_df["total_volume"]
+                    _vol_df["avg_spread"] = None
+                    _vol_df["close_time"] = None
+                    return _vol_df, None
+        except Exception:
+            pass
         return pd.DataFrame(), "No candlestick data found (SQLite or PostgreSQL)"
     except Exception as exc:
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=10)
 def get_market_price_history(
     ticker: str,
     interval: int = 60,
@@ -1945,7 +2091,7 @@ def get_market_price_history(
 
 # -- Table sizes (system page) --------------------------------------------------
 
-@st.cache_data(ttl=30, max_entries=1)
+@st.cache_data(ttl=300, max_entries=1)
 def get_live_market_summary() -> Dict[str, Any]:
     """
     Build a market summary from the live WebSocket state.
@@ -2040,18 +2186,13 @@ def get_live_market_summary() -> Dict[str, Any]:
                     })
         complement_arbs.sort(key=lambda x: x["net_edge_cents"], reverse=True)
 
-        # -- Strategy 2: Collectively-exhaustive bucket arb (same event, sum YES asks < 1.0)
-        # Group markets by event prefix (ticker up to last '-')
-        from collections import defaultdict
-        _by_event: Dict[str, list] = defaultdict(list)
-        for q in quotes:
-            if q.is_stale:      # same freshness gate as complement scan
-                continue
-            parts = q.ticker.rsplit("-", 1)
-            if len(parts) == 2:
-                _by_event[parts[0]].append(q)
+        # -- Strategy 2: CE scanner disabled — partial Synthesis feed coverage means
+        # missing legs make sum(YES asks) < 1.0 even when no arb exists.
+        # The ws_bridge CE scanner (also disabled) is the gated path; this
+        # secondary scan is suppressed to eliminate the false-positive flood.
         ce_arbs = []
-        for event_prefix, legs in _by_event.items():
+        if False:  # CE disabled — feed artifacts from partial leg coverage
+         for event_prefix, legs in {}.items():
             if len(legs) < 2 or len(legs) > 20:
                 continue
             if _is_sports_dl(event_prefix):             # skip sports stat markets
@@ -2109,7 +2250,7 @@ def get_live_market_summary() -> Dict[str, Any]:
                     "age_s": round(sum(l.age_seconds for l in legs_sorted) / len(legs_sorted), 0),
                     "legs": [l.ticker for l in legs_sorted],
                 })
-        ce_arbs.sort(key=lambda x: x["net_edge_cents"], reverse=True)
+        # ce_arbs is always [] — CE scanner disabled above
 
         # -- Strategies 3-5: pull ME / threshold / superset from live_state queue
         # ws_bridge already validates and emits these; no need to recompute here.
@@ -2128,7 +2269,7 @@ def get_live_market_summary() -> Dict[str, Any]:
             other_arbs = []
 
         # Combined arb list
-        all_live_arbs = complement_arbs[:30] + ce_arbs[:20] + other_arbs[:20]
+        all_live_arbs = complement_arbs[:30] + other_arbs[:20]  # ce_arbs excluded (CE disabled)
         all_live_arbs.sort(key=lambda x: x["net_edge_cents"], reverse=True)
 
         # Top markets by tightest spread
@@ -2163,7 +2304,70 @@ def get_live_market_summary() -> Dict[str, Any]:
         return {"source": "live", "markets": 0, "error": str(exc)}
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=1)
+def get_arb_30day_counts() -> Dict[str, int]:
+    """Return daily arb counts for the last 30 days. Cached 900s — reuses SQLAlchemy pool."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    spine = [(today - _td(days=29 - i)).isoformat() for i in range(30)]
+    counts: Dict[str, int] = {d: 0 for d in spine}
+    loaded = False
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SET statement_timeout = '8000'"))
+            rows = conn.execute(text(
+                "SELECT DATE(detected_at)::text, COUNT(*) FROM live_arbs_cloud "
+                "WHERE detected_at >= NOW()-INTERVAL '30 days' "
+                "AND strategy_type != 'collectively_exhaustive' GROUP BY 1"
+            )).fetchall()
+        for r in (rows or []):
+            k = str(r[0])[:10]
+            if k in counts:
+                counts[k] = int(r[1])
+        loaded = True
+    except Exception:
+        pass
+    if not loaded:
+        # Try live_arb_store Neon (same live_arbs_cloud table, different engine)
+        try:
+            import dashboard.live_arb_store as _las_dl_05
+            from sqlalchemy import text as _text_las
+            _engine_las = getattr(_las_dl_05, "_pg_engine", None) or _las_dl_05.get_pg_engine_cached()
+            if _engine_las is not None:
+                with _engine_las.connect() as _conn_las:
+                    _rows_las = _conn_las.execute(_text_las(
+                        "SELECT DATE(detected_at)::text, COUNT(*) FROM live_arbs_cloud "
+                        "WHERE detected_at >= NOW()-INTERVAL '30 days' "
+                        "AND strategy_type != 'collectively_exhaustive' GROUP BY 1"
+                    )).fetchall()
+                for _r in (_rows_las or []):
+                    _k = str(_r[0])[:10]
+                    if _k in counts:
+                        counts[_k] = int(_r[1])
+                loaded = True
+        except Exception:
+            pass
+    if not loaded:
+        try:
+            _c = _sqlite_conn()
+            if _c:
+                for r in (_c.execute(
+                    "SELECT SUBSTR(detected_at,1,10) d, COUNT(*) n FROM live_arbs "
+                    "WHERE detected_at >= date('now','-30 days') "
+                    "AND strategy_type != 'collectively_exhaustive' GROUP BY d"
+                ).fetchall() or []):
+                    if r[0] in counts:
+                        counts[r[0]] = int(r[1])
+                _c.close()
+        except Exception:
+            pass
+    return counts
+
+
+@st.cache_data(ttl=900, max_entries=1)
 def get_arb_time_of_day_stats() -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Breaks down arbitrage opportunities by hour of day (UTC).
@@ -2175,7 +2379,6 @@ def get_arb_time_of_day_stats() -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 SELECT
                     EXTRACT(HOUR FROM detected_at AT TIME ZONE 'UTC')::int AS hour,
@@ -2184,6 +2387,7 @@ def get_arb_time_of_day_stats() -> Tuple[pd.DataFrame, Optional[str]]:
                     COUNT(*) FILTER (WHERE classification='A') AS executable_count
                 FROM arbitrage_opportunities
                 WHERE net_edge > 0
+                  AND strategy_type != 'collectively_exhaustive'
                 GROUP BY 1
                 ORDER BY 1
             """), conn)
@@ -2195,7 +2399,8 @@ def get_arb_time_of_day_stats() -> Tuple[pd.DataFrame, Optional[str]]:
                 # Fetch raw detected_at and use pandas for UTC-aware hour extraction
                 raw = pd.read_sql_query(
                     "SELECT detected_at, CAST(net_edge AS REAL) AS net_edge, classification "
-                    "FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0",
+                    "FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0"
+                    " AND strategy_type != 'collectively_exhaustive'",
                     c,
                 )
                 c.close()
@@ -2214,10 +2419,30 @@ def get_arb_time_of_day_stats() -> Tuple[pd.DataFrame, Optional[str]]:
                     )
                     return df, None
             except Exception: pass
+        # Neon fallback: hour-of-day from live_arbs_cloud
+        try:
+            import dashboard.live_arb_store as _las_dl_06
+            from sqlalchemy import text as _hod_text
+            _hod_engine = getattr(_las_dl_06, "_pg_engine", None) or _las_dl_06.get_pg_engine_cached()
+            if _hod_engine is not None:
+                with _hod_engine.connect() as _hod_conn:
+                    _hod_df = pd.read_sql(_hod_text("""
+                        SELECT EXTRACT(HOUR FROM detected_at AT TIME ZONE 'UTC')::int AS hour,
+                               COUNT(*) AS count,
+                               AVG(net_edge_cents) AS avg_edge_cents,
+                               0 AS executable_count
+                        FROM live_arbs_cloud
+                        WHERE net_edge_cents > 0 AND strategy_type != 'collectively_exhaustive'
+                        GROUP BY 1 ORDER BY 1
+                    """), _hod_conn)
+                if not _hod_df.empty:
+                    return _hod_df, None
+        except Exception:
+            pass
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=1)
 def get_arb_day_of_week_stats() -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Breaks down arbitrage opportunities by day of week (0=Sunday .. 6=Saturday).
@@ -2228,7 +2453,6 @@ def get_arb_day_of_week_stats() -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 SELECT
                     EXTRACT(DOW FROM detected_at AT TIME ZONE 'UTC')::int AS dow_num,
@@ -2238,6 +2462,7 @@ def get_arb_day_of_week_stats() -> Tuple[pd.DataFrame, Optional[str]]:
                     PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_seconds) AS median_lifetime_s
                 FROM arbitrage_opportunities
                 WHERE net_edge > 0
+                  AND strategy_type != 'collectively_exhaustive'
                 GROUP BY 1, 2
                 ORDER BY 1
             """), conn)
@@ -2251,7 +2476,8 @@ def get_arb_day_of_week_stats() -> Tuple[pd.DataFrame, Optional[str]]:
                 _DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
                 raw = pd.read_sql_query(
                     "SELECT detected_at, CAST(net_edge AS REAL) AS net_edge "
-                    "FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0",
+                    "FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0"
+                    " AND strategy_type != 'collectively_exhaustive'",
                     c,
                 )
                 c.close()
@@ -2270,10 +2496,31 @@ def get_arb_day_of_week_stats() -> Tuple[pd.DataFrame, Optional[str]]:
                     df["median_lifetime_s"] = 0
                     return df, None
             except Exception: pass
+        # Neon fallback: day-of-week from live_arbs_cloud
+        try:
+            import dashboard.live_arb_store as _las_dl_07
+            from sqlalchemy import text as _dow_text
+            _dow_engine = getattr(_las_dl_07, "_pg_engine", None) or _las_dl_07.get_pg_engine_cached()
+            if _dow_engine is not None:
+                _DOW_NAMES_N = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                with _dow_engine.connect() as _dow_conn:
+                    _dow_df = pd.read_sql(_dow_text("""
+                        SELECT EXTRACT(DOW FROM detected_at AT TIME ZONE 'UTC')::int AS dow_num,
+                               TO_CHAR(detected_at AT TIME ZONE 'UTC', 'Dy') AS dow_label,
+                               COUNT(*) AS count, AVG(net_edge_cents) AS avg_edge_cents,
+                               0 AS median_lifetime_s
+                        FROM live_arbs_cloud
+                        WHERE net_edge_cents > 0 AND strategy_type != 'collectively_exhaustive'
+                        GROUP BY 1, 2 ORDER BY 1
+                    """), _dow_conn)
+                if not _dow_df.empty:
+                    return _dow_df, None
+        except Exception:
+            pass
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=1)
 def get_arb_settlement_proximity_stats() -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Computes arb count / avg edge grouped by days-until-settlement at time of detection.
@@ -2284,7 +2531,6 @@ def get_arb_settlement_proximity_stats() -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 WITH opp_markets AS (
                     SELECT
@@ -2340,7 +2586,7 @@ def get_arb_settlement_proximity_stats() -> Tuple[pd.DataFrame, Optional[str]]:
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=1)
 def get_arb_edge_by_strategy_class() -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Returns edge percentiles (25th, median, 75th, 95th) and count grouped by
@@ -2351,7 +2597,6 @@ def get_arb_edge_by_strategy_class() -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 SELECT
                     strategy_type,
@@ -2368,6 +2613,7 @@ def get_arb_edge_by_strategy_class() -> Tuple[pd.DataFrame, Optional[str]]:
                     ROUND(AVG(duration_seconds)::numeric, 0) AS avg_lifetime_s
                 FROM arbitrage_opportunities
                 WHERE net_edge > 0
+                  AND strategy_type != 'collectively_exhaustive'
                 GROUP BY 1, 2
                 ORDER BY 1, 2
             """), conn)
@@ -2386,6 +2632,7 @@ def get_arb_edge_by_strategy_class() -> Tuple[pd.DataFrame, Optional[str]]:
                            CAST(net_edge AS REAL)*100 AS edge_cents,
                            {_dur_sel} AS duration_seconds
                     FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0
+                      AND strategy_type != 'collectively_exhaustive'
                 """, c)
                 c.close()
                 if not raw.empty:
@@ -2406,10 +2653,43 @@ def get_arb_edge_by_strategy_class() -> Tuple[pd.DataFrame, Optional[str]]:
                     df = pd.DataFrame(rows).sort_values(["strategy_type", "classification"])
                     return df, None
             except Exception: pass
+        # Neon fallback: use live_arbs_cloud (no classification column)
+        try:
+            import dashboard.live_arb_store as _las_dl_08
+            from sqlalchemy import text as _edge_text
+            _edge_eng = getattr(_las_dl_08, "_pg_engine", None) or _las_dl_08.get_pg_engine_cached()
+            if _edge_eng is not None:
+                with _edge_eng.connect() as _edge_conn:
+                    _edge_raw = _edge_conn.execute(_edge_text(
+                        "SELECT strategy_type, net_edge_cents FROM live_arbs_cloud "
+                        "WHERE net_edge_cents > 0 AND strategy_type != 'collectively_exhaustive'"
+                    )).fetchall()
+                if _edge_raw:
+                    import pandas as _pd_edge
+                    _edge_df_raw = _pd_edge.DataFrame(_edge_raw, columns=["strategy_type", "net_edge_cents"])
+                    _edge_rows = []
+                    for _strat_e, _grp_e in _edge_df_raw.groupby("strategy_type"):
+                        _edges_e = _grp_e["net_edge_cents"].dropna()
+                        if len(_edges_e) == 0:
+                            continue
+                        _edge_rows.append({
+                            "strategy_type":     _strat_e,
+                            "classification":    "A",
+                            "count":             len(_grp_e),
+                            "p25_edge_cents":    round(float(_edges_e.quantile(0.25)), 2),
+                            "median_edge_cents": round(float(_edges_e.quantile(0.50)), 2),
+                            "p75_edge_cents":    round(float(_edges_e.quantile(0.75)), 2),
+                            "p95_edge_cents":    round(float(_edges_e.quantile(0.95)), 2),
+                            "avg_lifetime_s":    0.0,
+                        })
+                    if _edge_rows:
+                        return _pd_edge.DataFrame(_edge_rows).sort_values("strategy_type"), None
+        except Exception:
+            pass
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=1)
 def get_arb_rolling_7d() -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Rolling 7-day count and average edge for the trend chart on the historical arb page.
@@ -2420,7 +2700,6 @@ def get_arb_rolling_7d() -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 WITH daily AS (
                     SELECT
@@ -2430,6 +2709,7 @@ def get_arb_rolling_7d() -> Tuple[pd.DataFrame, Optional[str]]:
                         COUNT(*) FILTER (WHERE classification='A') AS executable_count
                     FROM arbitrage_opportunities
                     WHERE net_edge > 0
+                      AND strategy_type != 'collectively_exhaustive'
                     GROUP BY 1
                 )
                 SELECT
@@ -2456,15 +2736,38 @@ def get_arb_rolling_7d() -> Tuple[pd.DataFrame, Optional[str]]:
                            COUNT(CASE WHEN classification='A' THEN 1 END) AS executable_count,
                            COUNT(*) AS rolling_7d_count
                     FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0
+                      AND strategy_type != 'collectively_exhaustive'
                     GROUP BY 1 ORDER BY 1
                 """, c)
                 c.close()
                 return df, None
             except Exception: pass
+        # Neon fallback: daily counts from live_arbs_cloud
+        try:
+            import dashboard.live_arb_store as _las_dl_09
+            from sqlalchemy import text as _r7d_text
+            _r7d_engine = getattr(_las_dl_09, "_pg_engine", None) or _las_dl_09.get_pg_engine_cached()
+            if _r7d_engine is not None:
+                with _r7d_engine.connect() as _r7d_conn:
+                    _r7d_df = pd.read_sql(_r7d_text("""
+                        SELECT DATE(detected_at)::text AS day,
+                               COUNT(*) AS count,
+                               AVG(net_edge_cents) AS avg_edge_cents,
+                               0 AS executable_count,
+                               COUNT(*) AS rolling_7d_count
+                        FROM live_arbs_cloud
+                        WHERE net_edge_cents > 0
+                          AND strategy_type != 'collectively_exhaustive'
+                        GROUP BY 1 ORDER BY 1
+                    """), _r7d_conn)
+                if not _r7d_df.empty:
+                    return _r7d_df, None
+        except Exception:
+            pass
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900, max_entries=1)
 def get_arb_by_category() -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Aggregate arbitrage opportunities by market category.
@@ -2476,7 +2779,6 @@ def get_arb_by_category() -> Tuple[pd.DataFrame, Optional[str]]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text("""
                 SELECT
                     COALESCE(e.category, 'unknown')   AS category,
@@ -2485,14 +2787,10 @@ def get_arb_by_category() -> Tuple[pd.DataFrame, Optional[str]]:
                     COUNT(*) FILTER (WHERE a.classification='A') AS class_a_count,
                     COUNT(*) FILTER (WHERE a.classification='B') AS class_b_count
                 FROM arbitrage_opportunities a
-                JOIN LATERAL (
-                    SELECT ticker
-                    FROM unnest(a.markets_involved) AS t(ticker)
-                    LIMIT 1
-                ) tickers ON true
-                LEFT JOIN markets m ON m.ticker = tickers.ticker
+                LEFT JOIN markets m ON m.ticker = (a.markets_involved)[1]
                 LEFT JOIN events  e ON e.event_ticker = m.event_ticker
                 WHERE a.net_edge > 0
+                  AND a.strategy_type != 'collectively_exhaustive'
                 GROUP BY 1
                 ORDER BY count DESC
                 LIMIT 50
@@ -2508,6 +2806,7 @@ def get_arb_by_category() -> Tuple[pd.DataFrame, Optional[str]]:
                     SELECT markets_involved, classification,
                            CAST(net_edge AS REAL)*100 AS net_edge_cents
                     FROM arbitrage_opportunities WHERE CAST(net_edge AS REAL) > 0
+                      AND strategy_type != 'collectively_exhaustive'
                 """, c)
                 c.close()
                 if not raw.empty:
@@ -2546,10 +2845,44 @@ def get_arb_by_category() -> Tuple[pd.DataFrame, Optional[str]]:
                     )
                     return df, None
             except Exception: pass
+        # Neon fallback: derive category from live_arbs_cloud.ticker
+        try:
+            import dashboard.live_arb_store as _las_dl_10
+            from sqlalchemy import text as _abc_text
+            _eng_abc = getattr(_las_dl_10, "_pg_engine", None) or _las_dl_10.get_pg_engine_cached()
+            if _eng_abc is not None:
+                with _eng_abc.connect() as _c_abc:
+                    _rows_abc = _c_abc.execute(_abc_text(
+                        "SELECT ticker, net_edge_cents FROM live_arbs_cloud "
+                        "WHERE net_edge_cents > 0 AND strategy_type != 'collectively_exhaustive'"
+                    )).fetchall()
+                if _rows_abc:
+                    import pandas as _pd_abc
+                    _raw_abc = _pd_abc.DataFrame(_rows_abc, columns=["ticker", "net_edge_cents"])
+                    _raw_abc["category"] = _raw_abc["ticker"].apply(
+                        lambda t: _derive_category_from_ticker(str(t).split("-")[0] if t else "")
+                    )
+                    _raw_abc["classification"] = "A"
+                    _df_abc = (
+                        _raw_abc.groupby("category")
+                        .agg(
+                            count=("net_edge_cents", "count"),
+                            avg_edge_cents=("net_edge_cents", "mean"),
+                            class_a_count=("classification", lambda x: (x == "A").sum()),
+                            class_b_count=("classification", lambda x: (x == "B").sum()),
+                        )
+                        .reset_index()
+                        .sort_values("count", ascending=False)
+                        .head(50)
+                    )
+                    return _df_abc, None
+        except Exception:
+            pass
         return pd.DataFrame(), str(exc)
 
 
 def get_table_sizes() -> pd.DataFrame:
+    """Return pg_stat_user_tables sizes. NOT cached — avoids zero-poison when DB not yet connected."""
     try:
         from database.repository import get_engine
         from sqlalchemy import text
@@ -2566,7 +2899,6 @@ def get_table_sizes() -> pd.DataFrame:
             ORDER BY pg_total_relation_size(relid) DESC
         """)
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             result = conn.execute(sql)
             rows = result.fetchall()
             return pd.DataFrame(rows, columns=list(result.keys()))
@@ -2586,9 +2918,246 @@ def get_table_sizes() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def get_live_arbs_cloud_count() -> int:
+    """Total row count for live_arbs_cloud. Delegates to get_live_arbs_cloud_stats to avoid a second round trip."""
+    return get_live_arbs_cloud_stats().get("total_count", -1)
+
+
+@st.cache_data(ttl=600, max_entries=1)
+def get_ext_market_daily_stats() -> Dict[str, Any]:
+    """Cached stats for ext_market_daily table — used by p10 System and p09 Research pages."""
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT COUNT(DISTINCT asset_name) AS n_assets,
+                       COUNT(*) AS n_rows,
+                       MIN(obs_date) AS earliest,
+                       MAX(obs_date) AS latest,
+                       MAX(fetched_at) AS last_fetch
+                FROM ext_market_daily
+            """)).fetchone()
+        if row and row[0]:
+            return {
+                "n_assets":   int(row[0] or 0),
+                "n_rows":     int(row[1] or 0),
+                "earliest":   str(row[2] or "")[:10],
+                "latest":     str(row[3] or "")[:10],
+                "last_fetch": str(row[4] or "")[:19],
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def get_live_arbs_cloud_stats() -> Dict[str, Any]:
+    """Count + avg edge + distinct tickers for live_arbs_cloud (NOT cached — avoids zero-poison when Neon not yet connected)."""
+    _query = """
+        SELECT
+            COUNT(*) AS total_count,
+            COUNT(*) FILTER (WHERE net_edge_cents > 0 AND strategy_type NOT IN ('yes_no_complement', 'collectively_exhaustive')) AS filtered_count,
+            AVG(net_edge_cents) FILTER (WHERE net_edge_cents > 0 AND strategy_type NOT IN ('yes_no_complement', 'collectively_exhaustive')) AS avg_net_edge_cents,
+            COUNT(DISTINCT ticker) AS distinct_tickers,
+            MAX(net_edge_cents) FILTER (WHERE net_edge_cents > 0 AND strategy_type NOT IN ('yes_no_complement', 'collectively_exhaustive')) AS max_net_edge_cents
+        FROM live_arbs_cloud
+    """
+    # Try analytics DB first
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(text(_query)).fetchone()
+        if row:
+            return {
+                "total_count": int(row[0] or 0),
+                "count": int(row[1] or 0),
+                "avg_net_edge_cents": float(row[2] or 0.0),
+                "distinct_tickers": int(row[3] or 0),
+                "max_net_edge_cents": float(row[4] or 0.0),
+            }
+    except Exception:
+        pass
+    # Fallback: Neon via live_arb_store (use cached engine to avoid 30s backoff)
+    try:
+        import dashboard.live_arb_store as _las_dl_11
+        from sqlalchemy import text as _lac_text
+        _engine = getattr(_las_dl_11, "_pg_engine", None) or _las_dl_11.get_pg_engine_cached()
+        if _engine is not None:
+            with _engine.connect() as _conn:
+                _row = _conn.execute(_lac_text(_query)).fetchone()
+            if _row:
+                return {
+                    "total_count": int(_row[0] or 0),
+                    "count": int(_row[1] or 0),
+                    "avg_net_edge_cents": float(_row[2] or 0.0),
+                    "distinct_tickers": int(_row[3] or 0),
+                    "max_net_edge_cents": float(_row[4] or 0.0),
+                }
+    except Exception:
+        pass
+    return {"total_count": 0, "count": 0, "avg_net_edge_cents": 0.0, "distinct_tickers": 0, "max_net_edge_cents": 0.0}
+
+
+@st.cache_data(ttl=120, max_entries=1)
+def get_arb_drought_timestamps(hours: int = 24) -> list:
+    """Return list of arb timestamps (ME/TH only) for drought analysis. Cached 120s."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SET statement_timeout = '8000'"))
+            rows = conn.execute(text(
+                "SELECT ts FROM arbs WHERE ts >= :cutoff "
+                "AND strategy_type NOT IN ('yes_no_complement', 'collectively_exhaustive') ORDER BY ts"
+            ), {"cutoff": cutoff}).fetchall()
+        return [r[0] for r in rows if r[0] is not None]
+    except Exception:
+        pass
+    # Neon fallback: use live_arbs_cloud.detected_at for drought analysis
+    try:
+        import dashboard.live_arb_store as _las_dl_12
+        from sqlalchemy import text as _drought_text
+        _eng_d = getattr(_las_dl_12, "_pg_engine", None) or _las_dl_12.get_pg_engine_cached()
+        if _eng_d is not None:
+            with _eng_d.connect() as _c_d:
+                _rows_d = _c_d.execute(_drought_text(
+                    "SELECT detected_at FROM live_arbs_cloud "
+                    "WHERE detected_at >= :cutoff "
+                    "AND strategy_type NOT IN ('yes_no_complement', 'collectively_exhaustive') "
+                    "ORDER BY detected_at"
+                ), {"cutoff": cutoff}).fetchall()
+            return [r[0] for r in _rows_d if r[0] is not None]
+    except Exception:
+        pass
+    return []
+
+
+@st.cache_data(ttl=120, max_entries=2)
+def get_arb_store_stats(min_edge_cents: float = 0.5, max_edge_cents: float = 25.0) -> Dict[str, Any]:
+    """
+    Batch all arb-store stats for p09 Research page in one CTE round-trip.
+    Reads from live_arbs_cloud (PostgreSQL) or arbitrage_opportunities (SQLite fallback).
+    TTL=120s so trend/drought panels refresh every 2 minutes.
+    """
+    result: Dict[str, Any] = {}
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SET statement_timeout = '8000'"))
+            row = conn.execute(text("""
+                WITH
+                  t_1h    AS (SELECT COUNT(*) AS n FROM arbs
+                               WHERE ts > now() - interval '1 hour'
+                                 AND strategy != 'collectively_exhaustive'),
+                  t_24h   AS (SELECT COUNT(*) AS n FROM arbs
+                               WHERE ts > now() - interval '24 hours'
+                                 AND strategy != 'collectively_exhaustive'),
+                  t_all   AS (SELECT COUNT(*) AS n FROM arbs
+                               WHERE strategy != 'collectively_exhaustive'),
+                  t_p1h   AS (SELECT COUNT(*) AS n FROM arbs
+                               WHERE ts > now() - interval '2 hours'
+                                 AND ts <= now() - interval '1 hour'
+                                 AND strategy != 'collectively_exhaustive'),
+                  t_p24h  AS (SELECT COUNT(*) AS n FROM arbs
+                               WHERE ts > now() - interval '48 hours'
+                                 AND ts <= now() - interval '24 hours'
+                                 AND strategy != 'collectively_exhaustive'),
+                  fee     AS (SELECT AVG(gross_edge_cents - net_edge_cents) AS avg_fee,
+                                     AVG(net_edge_cents / NULLIF(gross_edge_cents, 0)) AS avg_ret,
+                                     COUNT(*) FILTER (WHERE net_edge_cents <= 0) AS zero_net
+                               FROM arbs WHERE strategy != 'collectively_exhaustive'),
+                  dqa     AS (SELECT COUNT(*) AS total,
+                                     COUNT(CASE WHEN net_edge_cents IS NULL THEN 1 END) AS null_net,
+                                     COUNT(CASE WHEN gross_edge_cents <= 0 THEN 1 END) AS invalid_gross,
+                                     COUNT(CASE WHEN strategy IS NULL OR strategy = '' THEN 1 END) AS missing_strat,
+                                     MAX(ts) AS last_ts
+                               FROM arbs WHERE strategy != 'collectively_exhaustive'),
+                  gate    AS (SELECT
+                                     COUNT(*) FILTER (WHERE net_edge_cents <= 0) AS ghost,
+                                     COUNT(*) FILTER (WHERE net_edge_cents > 0 AND net_edge_cents < :min_e) AS below_min,
+                                     COUNT(*) FILTER (WHERE net_edge_cents > :max_e) AS above_max
+                               FROM arbs WHERE strategy != 'collectively_exhaustive')
+                SELECT
+                  t_1h.n, t_24h.n, t_all.n, t_p1h.n, t_p24h.n,
+                  fee.avg_fee, fee.avg_ret, fee.zero_net,
+                  dqa.total, dqa.null_net, dqa.invalid_gross, dqa.missing_strat, dqa.last_ts,
+                  gate.ghost, gate.below_min, gate.above_max
+                FROM t_1h, t_24h, t_all, t_p1h, t_p24h, fee, dqa, gate
+            """), {"min_e": min_edge_cents, "max_e": max_edge_cents}).fetchone()
+        if row:
+            result = {
+                "n_1h":            int(row[0] or 0),
+                "n_24h":           int(row[1] or 0),
+                "n_all":           int(row[2] or 0),
+                "n_prev_1h":       int(row[3] or 0),
+                "n_prev_24h":      int(row[4] or 0),
+                "avg_fee_paid":    float(row[5]) if row[5] is not None else None,
+                "avg_retention":   float(row[6]) if row[6] is not None else None,
+                "zero_net_count":  int(row[7] or 0),
+                "total":           int(row[8] or 0),
+                "null_net":        int(row[9] or 0),
+                "invalid_gross":   int(row[10] or 0),
+                "missing_strategy": int(row[11] or 0),
+                "last_ts":         str(row[12])[:19] if row[12] else None,
+                "ghost_blocked":   int(row[13] or 0),
+                "below_min_edge":  int(row[14] or 0),
+                "above_max_edge":  int(row[15] or 0),
+                "source":          "pg",
+            }
+    except Exception:
+        pass
+    if not result:
+        # Neon fallback: use live_arbs_cloud (different table, same Neon DB)
+        try:
+            import dashboard.live_arb_store as _las_ass
+            from sqlalchemy import text as _ass_text
+            _ass_engine = getattr(_las_ass, "_pg_engine", None) or _las_ass.get_pg_engine_cached()
+            if _ass_engine is not None:
+                with _ass_engine.connect() as _ass_conn:
+                    _ass_row = _ass_conn.execute(_ass_text(
+                        "SELECT "
+                        "COUNT(*) FILTER (WHERE detected_at > NOW()-INTERVAL '1 hour') AS n_1h, "
+                        "COUNT(*) FILTER (WHERE detected_at > NOW()-INTERVAL '24 hours') AS n_24h, "
+                        "COUNT(*) AS n_all, "
+                        "AVG(gross_edge_cents - net_edge_cents) AS avg_fee, "
+                        "AVG(net_edge_cents / NULLIF(gross_edge_cents, 0)) AS avg_ret, "
+                        "MAX(detected_at)::text AS last_ts "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('collectively_exhaustive','yes_no_complement') "
+                        "AND net_edge_cents >= :min_e AND net_edge_cents <= :max_e"
+                    ), {"min_e": min_edge_cents, "max_e": max_edge_cents}).fetchone()
+                if _ass_row and _ass_row[2]:
+                    result = {
+                        "n_1h":           int(_ass_row[0] or 0),
+                        "n_24h":          int(_ass_row[1] or 0),
+                        "n_all":          int(_ass_row[2] or 0),
+                        "n_prev_1h":      0,
+                        "n_prev_24h":     0,
+                        "avg_fee_paid":   float(_ass_row[3]) if _ass_row[3] is not None else None,
+                        "avg_retention":  float(_ass_row[4]) if _ass_row[4] is not None else None,
+                        "zero_net_count": 0,
+                        "total":          int(_ass_row[2] or 0),
+                        "null_net":       0, "invalid_gross": 0, "missing_strategy": 0,
+                        "last_ts":        str(_ass_row[5])[:19] if _ass_row[5] else None,
+                        "ghost_blocked":  0, "below_min_edge": 0, "above_max_edge": 0,
+                        "source":         "neon_cloud",
+                    }
+        except Exception:
+            pass
+    return result
+
+
 # -- External market data (cross-asset page) -----------------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, max_entries=4)
 def get_external_market_prices(asset_names: list | None = None, days: int = 90) -> Tuple[pd.DataFrame, Optional[str]]:
     """
     Read external market data (yfinance + BOC VALET) from PostgreSQL.
@@ -2606,7 +3175,6 @@ def get_external_market_prices(asset_names: list | None = None, days: int = 90) 
         else:
             where_asset = ""
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             df = pd.read_sql(text(f"""
                 SELECT asset_name, obs_date, close_val, open_val, high_val, low_val, volume_val, source
                 FROM ext_market_daily
@@ -2619,7 +3187,7 @@ def get_external_market_prices(asset_names: list | None = None, days: int = 90) 
         return pd.DataFrame(), str(exc)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, max_entries=1)
 def get_latest_external_prices() -> Dict[str, float]:
     """Return most recent close_val per asset from ext_market_daily."""
     try:
@@ -2627,7 +3195,6 @@ def get_latest_external_prices() -> Dict[str, float]:
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(text("SET statement_timeout = '5000'"))
             rows = conn.execute(text("""
                 SELECT DISTINCT ON (asset_name) asset_name, close_val
                 FROM ext_market_daily
@@ -2638,6 +3205,108 @@ def get_latest_external_prices() -> Dict[str, float]:
     except Exception as exc:
         logger.debug("get_latest_external_prices: %s", exc)
         return {}
+
+
+@st.cache_data(ttl=120, max_entries=1)
+def get_arb_store_recent(limit: int = 10) -> Dict[str, Any]:
+    """Cached: total arb count + most recent rows from `arbs` table. Used by p02 arb store panel."""
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT ticker, strategy, net_edge_cents, gross_edge_cents, ts,
+                       COUNT(*) OVER() AS total_count
+                FROM arbs
+                WHERE strategy != 'collectively_exhaustive'
+                ORDER BY ts DESC
+                LIMIT :lim
+            """), {"lim": limit}).fetchall()
+        if rows:
+            return {
+                "total_count": int(rows[0][5] or 0),
+                "rows": [tuple(r[:5]) for r in rows],  # (ticker, strategy, net, gross, ts)
+            }
+        return {"total_count": 0, "rows": []}
+    except Exception:
+        pass
+    # Neon fallback: use live_arbs_cloud for recent arb rows
+    try:
+        import dashboard.live_arb_store as _las_dl_13
+        from sqlalchemy import text as _asr_text
+        _eng_asr = getattr(_las_dl_13, "_pg_engine", None) or _las_dl_13.get_pg_engine_cached()
+        if _eng_asr is not None:
+            with _eng_asr.connect() as _c_asr:
+                _rows_asr = _c_asr.execute(_asr_text("""
+                    SELECT ticker, strategy_type, net_edge_cents, gross_edge_cents, detected_at,
+                           COUNT(*) OVER() AS total_count
+                    FROM live_arbs_cloud
+                    WHERE strategy_type != 'collectively_exhaustive'
+                    ORDER BY detected_at DESC
+                    LIMIT :lim
+                """), {"lim": limit}).fetchall()
+            if _rows_asr:
+                return {
+                    "total_count": int(_rows_asr[0][5] or 0),
+                    "rows": [tuple(r[:5]) for r in _rows_asr],
+                }
+    except Exception:
+        pass
+    return {"total_count": -1, "rows": []}
+
+
+@st.cache_data(ttl=300, max_entries=20)
+def get_ticker_arb_history(ticker_prefix: str) -> Dict[str, Any]:
+    """Cached: arb count + avg edge for a ticker prefix (last 30 days). Used by p03 market detail."""
+    try:
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SET statement_timeout = '3000'"))
+            row = conn.execute(text("""
+                SELECT COUNT(*) AS arb_count, AVG(net_edge_cents) AS avg_edge
+                FROM arbs
+                WHERE ticker LIKE :prefix
+                  AND ts >= NOW() - INTERVAL '30 days'
+                  AND strategy != 'collectively_exhaustive'
+            """), {"prefix": f"{ticker_prefix}%"}).fetchone()
+        if row:
+            return {"count": int(row[0] or 0), "avg_edge": float(row[1]) if row[1] is not None else None}
+        return {"count": 0, "avg_edge": None}
+    except Exception:
+        # SQLite fallback
+        try:
+            c = _sqlite_conn()
+            if c:
+                r = c.execute(
+                    "SELECT COUNT(*) AS arb_count, AVG(net_edge_cents) AS avg_edge "
+                    "FROM arbs WHERE ticker LIKE ? AND created_at >= datetime('now', '-30 days') AND strategy != 'collectively_exhaustive'",
+                    (f"{ticker_prefix}%",),
+                ).fetchone()
+                c.close()
+                if r:
+                    return {"count": int(r[0] or 0), "avg_edge": float(r[1]) if r[1] is not None else None}
+        except Exception:
+            pass
+        # Neon fallback: query live_arbs_cloud by ticker prefix
+        try:
+            import dashboard.live_arb_store as _las_dl_14
+            from sqlalchemy import text as _tah_text
+            _tah_engine = getattr(_las_dl_14, "_pg_engine", None) or _las_dl_14.get_pg_engine_cached()
+            if _tah_engine is not None:
+                with _tah_engine.connect() as _tah_conn:
+                    _tah_row = _tah_conn.execute(_tah_text(
+                        "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs_cloud "
+                        "WHERE ticker LIKE :prefix AND detected_at >= NOW()-INTERVAL '30 days' "
+                        "AND strategy_type != 'collectively_exhaustive'"
+                    ), {"prefix": f"{ticker_prefix}%"}).fetchone()
+                if _tah_row:
+                    return {"count": int(_tah_row[0] or 0), "avg_edge": float(_tah_row[1]) if _tah_row[1] is not None else None}
+        except Exception:
+            pass
+        return {"count": 0, "avg_edge": None}
 
 
 def upsert_ext_prices(prices: dict) -> None:
@@ -2679,3 +3348,4 @@ def upsert_ext_prices(prices: dict) -> None:
             """), rows)
     except Exception as exc:
         logger.debug("upsert_ext_prices: %s", exc)
+

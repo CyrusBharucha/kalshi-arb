@@ -1,4 +1,4 @@
-﻿"""
+"""
 analysis/historical_arb_scanner.py
 Run arbitrage detection across all historical trade/candlestick data.
 

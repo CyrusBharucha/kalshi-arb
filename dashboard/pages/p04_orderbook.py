@@ -38,13 +38,76 @@ ORDER BOOK
     from dashboard.live_state import get_live_state as _gls
     _ws = _gls().get_stats()
     _ws_on = _ws.get("connected", False)
-    _ws_dot = GREEN if _ws_on else "#6B7280"
-    _ws_txt = f"{_ws.get('markets_tracked', 0):,} markets · {_ws.get('messages_per_sec', 0):.0f} msg/s" if _ws_on else "feed offline — add SYNTHESIS_SECRET_KEY to enable"
+    import os as _os_p04
+    _sk_p04 = _os_p04.environ.get("SYNTHESIS_SECRET_KEY", "").strip()
+    if not _sk_p04:
+        try:
+            _sk_p04 = (st.secrets.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+        except Exception:
+            pass
+    if not _sk_p04:
+        try:
+            for _ns_p04 in st.secrets.values():
+                if hasattr(_ns_p04, "get"):
+                    _sk_p04 = (_ns_p04.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+                    if _sk_p04:
+                        break
+        except Exception:
+            pass
+    _has_key_p04 = bool(_sk_p04)
+    # Check Neon state for feed label
+    _p04_neon_ok = False
+    try:
+        import dashboard.live_arb_store as _las_p04_feed
+        _p04_neon_ok = (
+            bool(getattr(_las_p04_feed, "_pg_ok", False))
+            or (getattr(_las_p04_feed, "_pg_engine", None) is not None)
+        )
+        if not _p04_neon_ok:
+            _p04_neon_ok = _las_p04_feed.get_pg_engine_cached() is not None
+    except Exception:
+        pass
+    if not _p04_neon_ok:
+        _p04_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+    _ws_dot = GREEN if _ws_on else (GREEN if _p04_neon_ok else (AMBER if _has_key_p04 else "#6B7280"))
+    if _ws_on:
+        _ws_txt = f"{_ws.get('markets_tracked', 0):,} markets · {_ws.get('messages_per_sec', 0):.0f} msg/s"
+    elif _p04_neon_ok:
+        _ws_txt = "CLOUD — historical arb data from Neon · L2 quotes available once WebSocket connects"
+    elif _has_key_p04:
+        _ws_txt = "↻ CONNECTING — L2 data available once WebSocket connects"
+    else:
+        _ws_txt = "feed offline — add SYNTHESIS_SECRET_KEY to Streamlit secrets"
     st.markdown(
         f"<div style='font-size:0.62rem;color:{TEXT3};font-family:JetBrains Mono,monospace;margin-bottom:0.5rem;'>"
         f"<span style='color:{_ws_dot};'>●</span> {_ws_txt}</div>",
         unsafe_allow_html=True,
     )
+    # When feed is offline, suggest tickers from Neon arb history
+    if not _ws_on:
+        try:
+            import dashboard.live_arb_store as _las_p04
+            from sqlalchemy import text as _p04_text
+            _p04_eng = getattr(_las_p04, "_pg_engine", None) or _las_p04.get_pg_engine_cached()
+            if _p04_eng is not None:
+                with _p04_eng.connect() as _p04_c:
+                    _p04_rows = _p04_c.execute(_p04_text(
+                        "SELECT ticker, MAX(detected_at) AS last_seen, "
+                        "MAX(net_edge_cents) AS best_edge "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type IN ('mutually_exclusive','threshold_order') "
+                        "GROUP BY ticker ORDER BY last_seen DESC LIMIT 10"
+                    )).fetchall()
+                if _p04_rows:
+                    _neon_ticker_opts = [r[0] for r in _p04_rows]
+                    st.info(
+                        "💡 **Neon arb history** — these tickers had detected arbs: "
+                        + ", ".join(f"`{t}`" for t in _neon_ticker_opts[:5])
+                        + (f" + {len(_neon_ticker_opts)-5} more" if len(_neon_ticker_opts) > 5 else "")
+                        + ". Enter one above to preload the ticker."
+                    )
+        except Exception:
+            pass
 
     # --- Market selector -----
     col_sel, col_src = st.columns([4, 1])
@@ -93,7 +156,7 @@ ORDER BOOK
             _k2.metric("MSG/SEC", f"{_ws2.get('messages_per_sec', 0):.1f}")
             _k3.metric("TOTAL MESSAGES", f"{_ws2.get('messages_total', 0):,}")
             _sess_p04 = state.get_session_stats()
-            _k4.metric("SESSION ARBS", f"{_sess_p04['total']:,}", help="Total arbs detected this session by background scanner")
+            _k4.metric("SESSION ARBS", f"{_sess_p04['total']:,}", help="Total scanner detections this session (ME/TH arbs + YNC feed artifacts). YNC detections are not executable.")
             st.markdown(f"<div style='font-size:0.65rem;color:{TEXT3};letter-spacing:0.06em;text-transform:uppercase;margin:0.5rem 0 0.3rem;'>TOP 20 MARKETS — tightest spreads</div>", unsafe_allow_html=True)
             live_data = [{
                 "TICKER": b.ticker,
@@ -385,8 +448,8 @@ upgrade is complete.
     k6.metric(
         "COMPLEMENT SPREAD",
         _comp_label,
-        help="(YES ask + NO ask) − 100c. Negative = complement arb exists. Green delta = arb opportunity.",
-        delta="ARB OPPORTUNITY" if _comp_spread < 0 else None,
+        help="(YES ask + NO ask) − 100c. Negative means quotes sum below parity — likely a rounding/feed artifact (Kalshi YES/NO are always complements; live YNC sum ≥ $1.00 always).",
+        delta="QUOTES BELOW PARITY" if _comp_spread < 0 else None,
         delta_color="normal" if _comp_spread < 0 else "off",
     )
     # --- Complement spread progress bar ("distance to arb") -----
@@ -395,15 +458,15 @@ upgrade is complete.
         _bar_color = "#22C55E" if _pct >= 97 else (AMBER if _pct >= 94 else TEXT3)
         _bar_width = min(100.0, max(0.0, _pct))
         if _pct < 100.0:
-            _bar_label = f"{_pct:.1f}¢ — {100.0 - _pct:.1f}¢ below parity (ARB)"
+            _bar_label = f"{_pct:.1f}¢ — {100.0 - _pct:.1f}¢ below parity (feed artifact)"
         else:
             _bar_label = f"{_pct:.1f}¢ — {_pct - 100.0:.1f}¢ above parity"
         _toward_arb_pct = min(100.0, max(0.0, _pct))
-        _toward_arb_label = f"{_toward_arb_pct:.1f}% toward arb"
+        _toward_arb_label = f"{_toward_arb_pct:.1f}% of parity"
         st.markdown(
             f"""<div style='margin:0.4rem 0 0.5rem 0;'>
 <div style='font-size:0.58rem;color:{TEXT3};letter-spacing:0.08em;text-transform:uppercase;
-font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO ask)</div>
+font-family:Inter,sans-serif;margin-bottom:3px;'>YES ask + NO ask (distance to parity)</div>
 <div style='background:{BORDER};border-radius:2px;height:6px;width:100%;position:relative;overflow:hidden;'>
 <div style='background:{_bar_color};height:6px;width:{_bar_width:.1f}%;border-radius:2px;'></div>
 </div>
@@ -551,51 +614,18 @@ font-family:Inter,sans-serif;margin-bottom:3px;'>DISTANCE TO ARB (YES ask + NO a
     with st.expander("📈 What this spread means", expanded=False):
         st.markdown(
             "- **The complement spread = YES ask + NO ask.** For a fair market this equals exactly $1.00.\n"
-            "- **Spread < $1.00** means buying both legs costs less than $1.00 — an arbitrage opportunity exists.\n"
-            "- **Spread > $1.00** means no arb. The market maker captures the spread.\n"
-            "- Our scanner detects spreads that survive the 2¢ fee floor after Kalshi's taker fee."
+            "- **Spread < $1.00** means quotes sum below parity — a feed/rounding artifact. Kalshi YES/NO are structurally complementary so live round-trip cost is always ≥ $1.00.\n"
+            "- **Spread > $1.00** is normal. The market maker captures the bid-ask spread.\n"
+            "- The YNC scanner runs and detects sub-$1.00 quotes; all detections are feed artifacts (not executable)."
         )
 
     if _comp_cost < 1.0:
         _comp_gross = (1.0 - _comp_cost) * 100
-        _fee_yes = min(3.5, math.ceil(0.07 * yes_ask * (1.0 - yes_ask) * 100))
-        _fee_no  = min(3.5, math.ceil(0.07 * no_ask  * (1.0 - no_ask)  * 100))
-        _comp_net = _comp_gross - _fee_yes - _fee_no
-        if _comp_net > 0.005:
-            st.markdown(
-                f"<div style='background:#052e16;border:1px solid #22C55E;border-left:4px solid #22C55E;"
-                f"padding:0.5rem 1rem;border-radius:3px;margin-top:0.4rem;margin-bottom:0.4rem;"
-                f"font-family:JetBrains Mono,monospace;font-size:0.72rem;'>"
-                f"<span style='color:#22C55E;font-weight:600;'>⚡ COMPLEMENT ARB</span>&nbsp;&nbsp;"
-                f"YES ask {yes_ask*100:.1f}c + NO ask {no_ask*100:.1f}c = {_comp_cost*100:.1f}c &lt; 100c &nbsp;|&nbsp; "
-                f"Gross: +{_comp_gross:.2f}c &nbsp;·&nbsp; Fees: {_fee_yes+_fee_no:.2f}c &nbsp;·&nbsp; "
-                f"<span style='color:#22C55E;'>NET: +{_comp_net:.2f}c</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            # --- EXECUTION SNAPSHOT ---
-            # Best YES ask size: first level of yes_asks (ascending)
-            _snap_yes_asks = sorted(book.get("yes_asks", []), key=lambda x: x[0]) if book.get("yes_asks") else []
-            _snap_yes_bids = sorted(book.get("yes_bids", []), key=lambda x: x[0], reverse=True) if book.get("yes_bids") else []
-            # NO ask corresponds to YES bid (NO ask price = 1 - YES bid price); size at best NO ask = best YES bid size
-            _yes_ask_avail = int(_snap_yes_asks[0][1]) if _snap_yes_asks and _snap_yes_asks[0][1] else None
-            _no_ask_avail  = int(_snap_yes_bids[0][1]) if _snap_yes_bids and _snap_yes_bids[0][1] else None
-            _yes_avail_str = f"{_yes_ask_avail:,}" if _yes_ask_avail else "?"
-            _no_avail_str  = f"{_no_ask_avail:,}"  if _no_ask_avail  else "?"
-            _exec_size = min(_yes_ask_avail or 0, _no_ask_avail or 0)
-            _exec_gross_dollar = _exec_size * (1.0 - _comp_cost) if _exec_size else 0.0
-            _exec_net_dollar   = _exec_size * (_comp_net / 100) if _exec_size else 0.0
-            st.success(
-                f"**HOW TO EXECUTE — COMPLEMENT ARB**\n\n"
-                f"1. Buy YES at **{yes_ask*100:.1f}c** ({_yes_avail_str} avail)\n\n"
-                f"2. Buy NO at **{no_ask*100:.1f}c** ({_no_avail_str} avail) — simultaneously\n\n"
-                f"Combined cost: **{_comp_cost*100:.1f}c** &lt; 100c guaranteed payout\n\n"
-                f"Target: **{_exec_size:,} contracts** (min of both sides available)\n\n"
-                f"Capital required: **${_exec_size * _comp_cost:.2f}** &nbsp;·&nbsp; "
-                f"Gross P&L: **${_exec_gross_dollar:.2f}** &nbsp;·&nbsp; "
-                f"Fees: **{_fee_yes+_fee_no:.2f}c/contract** &nbsp;·&nbsp; "
-                f"Net P&L: **${_exec_net_dollar:.2f}**"
-            )
+        st.caption(
+            f"⚠ Quotes below parity: YES ask {yes_ask*100:.1f}c + NO ask {no_ask*100:.1f}c = {_comp_cost*100:.1f}c. "
+            f"Apparent gap: {_comp_gross:.2f}c — this is a feed/rounding artifact. "
+            f"Kalshi YES/NO are structurally complementary; live round-trip cost is always ≥ $1.00."
+        )
 
     # -------------------------------------------------------------- L2 Depth table --------------------------------------------------------------
     yes_bids: List = book.get("yes_bids", [[yes_bid, None]])
@@ -882,7 +912,7 @@ color:{color};margin-top:0.5rem;letter-spacing:0.04em;'>
         import time as _t04
         _now04 = _t04.time()
         if st.session_state.get("_p04_next_refresh", 0) <= _now04:
-            st.session_state["_p04_next_refresh"] = _now04 + 2
+            st.session_state["_p04_next_refresh"] = _now04 + 5
             st.rerun()
 
 
@@ -1241,4 +1271,5 @@ letter-spacing:0.04em;'>
 </div>""",
         unsafe_allow_html=True,
     )
+
 

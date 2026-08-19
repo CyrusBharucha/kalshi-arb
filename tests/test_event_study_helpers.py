@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_event_study_helpers.py
 ===================================
 Unit tests for pure-logic helper functions in cross_asset/event_study.py:

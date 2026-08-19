@@ -1,4 +1,4 @@
-"""dashboard/pages/p03_markets.py --  Market Explorer"""
+﻿"""dashboard/pages/p03_markets.py --  Market Explorer"""
 from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
@@ -30,8 +30,45 @@ MARKET EXPLORER
     _ws_live = _gls().get_stats().get("connected", False)
     _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
     _db_live = _health.get("db_connected", False)
-    _src_dot = GREEN if _ws_live else (AMBER if _db_live else "#6B7280")
-    _src_txt = "LIVE" if _ws_live else ("DB snapshot" if _db_live else "offline")
+    import os as _os_p03
+    _sk_p03 = _os_p03.environ.get("SYNTHESIS_SECRET_KEY", "").strip()
+    if not _sk_p03:
+        try:
+            _sk_p03 = (st.secrets.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+        except Exception:
+            pass
+    if not _sk_p03:
+        try:
+            for _ns_p03 in st.secrets.values():
+                if hasattr(_ns_p03, "get"):
+                    _sk_p03 = (_ns_p03.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+                    if _sk_p03:
+                        break
+        except Exception:
+            pass
+    _has_key_p03 = bool(_sk_p03)
+    # Check Neon state for source label
+    _p03_neon_ok = False
+    try:
+        import dashboard.live_arb_store as _las_p03
+        _p03_neon_ok = (
+            bool(getattr(_las_p03, "_pg_ok", False))
+            or (getattr(_las_p03, "_pg_engine", None) is not None)
+        )
+        if not _p03_neon_ok:
+            _p03_neon_ok = _las_p03.get_pg_engine_cached() is not None
+    except Exception:
+        pass
+    if not _p03_neon_ok:
+        _p03_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+    if _ws_live:
+        _src_dot, _src_txt = GREEN, "LIVE"
+    elif _db_live or _p03_neon_ok:
+        _src_dot, _src_txt = GREEN, "CLOUD"
+    elif _has_key_p03:
+        _src_dot, _src_txt = AMBER, "↻ CONNECTING"
+    else:
+        _src_dot, _src_txt = "#6B7280", "offline"
     st.markdown(
         f"<div style='font-size:0.62rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
         f"margin-bottom:0.5rem;'><span style='color:{_src_dot};'>●</span> {_src_txt}</div>",
@@ -90,16 +127,23 @@ MARKET EXPLORER
         canadian = st.checkbox("CANADIAN ONLY", value=False, key="p03_canadian")
 
     with f4:
-        has_arb = st.checkbox("ARB ONLY", value=False, key="p03_has_arb")
+        has_arb = st.checkbox("DETECTED ONLY", value=False, key="p03_has_arb")
 
     with f5:
         min_vol = st.number_input("MIN VOLUME", value=0, step=100, min_value=0, key="p03_min_vol")
 
-    # --- Category prefix filter pills -----
+    # --- Load (single call — prefixes derived from result below) -----
+    df, err = get_open_markets(
+        category_filter=cat_arg,
+        canadian_only=canadian,
+        min_volume=float(min_vol),
+        limit=10000,
+    )
+
+    # --- Category prefix filter pills (derived from loaded data) -----
     try:
-        _cat_df_tmp, _ = get_open_markets(limit=10000)
-        if not _cat_df_tmp.empty and "ticker" in _cat_df_tmp.columns:
-            _prefixes = _cat_df_tmp["ticker"].dropna().apply(lambda t: str(t).split("-")[0]).unique()
+        if not df.empty and "ticker" in df.columns:
+            _prefixes = df["ticker"].dropna().apply(lambda t: str(t).split("-")[0]).unique()
             sorted_prefixes = sorted(set(_prefixes))
         else:
             sorted_prefixes = []
@@ -109,14 +153,6 @@ MARKET EXPLORER
     except Exception:
         _selected_cats = []
         sorted_prefixes = []
-
-    # --- Load -----
-    df, err = get_open_markets(
-        category_filter=cat_arg,
-        canadian_only=canadian,
-        min_volume=float(min_vol),
-        limit=10000,
-    )
 
     if err and df.empty:
         # Fallback: show live WS markets
@@ -147,16 +183,78 @@ MARKET EXPLORER
                 live_df = pd.DataFrame(rows).sort_values("spread")
                 st.metric("LIVE MARKETS", f"{len(live_df):,}")
                 st.dataframe(live_df, use_container_width=True, height=600, hide_index=True)
-                st.caption("Live data from Synthesis WebSocket. Full market details require PostgreSQL.")
+                st.caption("Live data from Synthesis WebSocket. Full market details available when Neon cloud is connected.")
                 return
 
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;
+        # Check if Neon is reachable — direct row count is most reliable
+        _neon_ok_p03 = False
+        try:
+            from dashboard.data_layer import get_live_arbs_cloud_stats as _p03_neon_probe
+            if (_p03_neon_probe().get("total_count", 0) or 0) > 0:
+                _neon_ok_p03 = True
+        except Exception:
+            pass
+        if not _neon_ok_p03:
+            try:
+                import dashboard.live_arb_store as _las_p03
+                _neon_ok_p03 = (
+                    bool(getattr(_las_p03, "_pg_ok", False))
+                    or (getattr(_las_p03, "_pg_engine", None) is not None)
+                    or (_las_p03.get_pg_engine_cached() is not None)
+                )
+            except Exception:
+                pass
+        if not _neon_ok_p03:
+            _neon_ok_p03 = bool(st.session_state.get("_sidebar_neon_ok", False))
+        if _neon_ok_p03:
+            # Show recent arb tickers from Neon as proxy for active markets
+            try:
+                import dashboard.live_arb_store as _las_p03b
+                from sqlalchemy import text as _p03_text
+                _p03_eng = getattr(_las_p03b, "_pg_engine", None) or _las_p03b.get_pg_engine_cached()
+                if _p03_eng is not None:
+                    with _p03_eng.connect() as _p03_c:
+                        _p03_rows = _p03_c.execute(_p03_text(
+                            "SELECT ticker, MAX(detected_at) AS last_seen, "
+                            "MAX(net_edge_cents) AS best_edge, "
+                            "string_agg(DISTINCT strategy_type, ', ') AS strategies "
+                            "FROM live_arbs_cloud "
+                            "WHERE strategy_type != 'collectively_exhaustive' "
+                            "GROUP BY ticker ORDER BY last_seen DESC LIMIT 20"
+                        )).fetchall()
+                    if _p03_rows:
+                        st.markdown(
+                            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                            f"color:{TEXT3};margin-bottom:0.4rem;'>NEON CLOUD — RECENTLY DETECTED ARB MARKETS</div>",
+                            unsafe_allow_html=True,
+                        )
+                        import pandas as _pd_p03
+                        _p03_df = _pd_p03.DataFrame(
+                            _p03_rows, columns=["Ticker", "Last Detected", "Best Edge (¢)", "Strategies"]
+                        )
+                        _p03_df["Best Edge (¢)"] = _p03_df["Best Edge (¢)"].apply(
+                            lambda v: f"{float(v):.2f}¢" if v else "--"
+                        )
+                        _p03_df["Last Detected"] = _p03_df["Last Detected"].apply(
+                            lambda v: str(v)[:16] if v else "--"
+                        )
+                        st.dataframe(_p03_df, use_container_width=True, hide_index=True)
+                        st.caption(
+                            "Live market data requires the Synthesis WebSocket feed. "
+                            "Showing historical arbs from Neon cloud as a proxy — ME/TH strategies are actionable."
+                        )
+                        return
+            except Exception:
+                pass
+            st.info("Markets table not yet populated in the cloud DB. Historical arb data is available in Arb History.")
+        else:
+            st.markdown(
+                f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;
 border-radius:3px;color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;'>
-DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
+Feed connecting — market quotes will appear once Synthesis WebSocket is live.
 </div>""",
-            unsafe_allow_html=True,
-        )
+                unsafe_allow_html=True,
+            )
         return
 
     if df.empty:
@@ -224,7 +322,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
         # Store actual combined value where both legs are available, else None
         df["_compl_arb"] = _combo.where(_ya.notna() & _yb.notna(), None)
 
-    # --- ARB SCORE: max(0, 1 - (yes_ask + no_ask)); positive cents = complement arb profit -----
+    # --- ARB SCORE: max(0, 1 - (yes_ask + no_ask)); positive = below parity (feed/rounding artifact) -----
     if "_compl_arb" in df.columns:
         _ca_n = pd.to_numeric(df["_compl_arb"], errors="coerce")
         df["_arb_score"] = (1.0 - _ca_n).clip(lower=0).where(_ca_n.notna(), None)
@@ -234,10 +332,9 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
     _sort_by = st.selectbox("SORT BY", _sort_options, key="p03_sort_by", label_visibility="visible")
     st.caption(
         "ARB SCORE: max(0, (1.00 − (yes_ask + no_ask)) × 100) expressed in cents. "
-        "A score of +5c means buying both legs costs only 95¢ for a guaranteed $1 payout — "
-        "i.e. a 5¢ risk-free profit before fees. Higher score = larger potential profit. "
-        "Zero means both legs sum to ≥ $1.00 (no complement arb). "
-        "Sorted descending: best arb candidates appear first."
+        "A score of +5c means the live quotes sum to 95¢ — 5¢ below parity. "
+        "Zero means both legs sum to ≥ $1.00 (at or above parity — normal). "
+        "Note: live YES+NO always sums ≥ $1.00 structurally; any score >0 reflects a feed/rounding artifact, not an executable opportunity."
     )
     if _sort_by == "ARB SCORE ↓" and "_arb_score" in df.columns:
         df = df.sort_values("_arb_score", ascending=False, na_position="last")
@@ -282,10 +379,10 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             lambda v: str(int(float(v))) if pd.notna(v) and int(float(v)) > 0 else ""
         )
     if "has_arb" in display.columns:
-        display["ARB"] = display["has_arb"].apply(lambda v: "✓" if v else "")
+        display["DETECTED"] = display["has_arb"].apply(lambda v: "✓" if v else "")
     if "_compl_arb" in display.columns:
         if _ws_live:
-            # WS is live: yes_ask + no_ask from live quotes; < 1.0 means genuine complement arb
+            # WS is live: yes_ask + no_ask from live quotes; < 1.0 is a feed/rounding artifact (YNC not executable)
             def _fmt_compl_arb(v):
                 if v is None or (isinstance(v, float) and pd.isna(v)):
                     return ""
@@ -294,7 +391,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                     return f"✓ {fv:.2f}" if fv < 1.0 else f"{fv:.2f}"
                 except (TypeError, ValueError):
                     return "✓" if v else ""
-            display["COMPL ARB?"] = display["_compl_arb"].apply(_fmt_compl_arb)
+            display["BELOW PARITY?"] = display["_compl_arb"].apply(_fmt_compl_arb)
         else:
             # WS offline: value is yes_ask + (1 - yes_bid) = round-trip bid-ask spread,
             # NOT a complement arb check. Show as-is with no checkmark.
@@ -344,7 +441,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
     # HAS ARB — use column if present (live DB); derive from arb_opportunities in snapshot
     if "has_arb" in df.columns:
         m4.metric("LIVE ARB", f"{int(df['has_arb'].fillna(False).sum()):,}",
-                  help="Markets with an open arb opportunity in the live database.")
+                  help="Markets flagged by scanner (ME/TH actionable; YNC records are feed artifacts — live YES+NO always ≥ $1.00).")
     elif _is_sqlite:
         _n_arb_markets = 0
         try:
@@ -356,7 +453,8 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             _mc4 = _gsc_m4() if _gsc_m4 is not None else None
             if _mc4:
                 _arb_rows = _mc4.execute(
-                    "SELECT markets_involved FROM arbitrage_opportunities WHERE markets_involved IS NOT NULL"
+                    "SELECT markets_involved FROM arbitrage_opportunities WHERE markets_involved IS NOT NULL "
+                    "AND strategy_type != 'collectively_exhaustive'"
                 ).fetchall()
                 _mc4.close()
                 _arb_tickers: set = set()
@@ -376,8 +474,8 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 _n_arb_markets = len(_arb_tickers)
         except Exception:
             pass
-        m4.metric("HIST ARB", f"{_n_arb_markets:,}",
-                  help="Markets appearing in any historical arbitrage opportunity (reference DB).")
+        m4.metric("HIST DETECT", f"{_n_arb_markets:,}",
+                  help="Markets appearing in any historical detection (reference DB — ME/TH arbs + YNC feed artifacts).")
     else:
         m4.metric("LIVE ARB", "--")
 
@@ -439,7 +537,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
     show_cols = [c for c in
                  ["ticker", "event_ticker", "category", "title",
                   "LIVE BID", "LIVE ASK", "LIVE SPR", "LAST", "BID", "ASK", "SPREAD", "VOLUME",
-                  "ARB SCORE", "RELS", "CA", "ARB", "COMPL ARB?", "ROUND-TRIP COST", "EXPIRES"]
+                  "ARB SCORE", "RELS", "CA", "DETECTED", "BELOW PARITY?", "ROUND-TRIP COST", "EXPIRES"]
                  if c in display.columns and c not in _db_quote_cols]
 
     # --- Group by selectbox -----
@@ -751,26 +849,14 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
     _det_compl_sp = round(_det_ya + (1.0 - _det_yb), 4) if _det_ya is not None and _det_yb is not None else None
     _det_arb_score = max(0.0, 1.0 - _det_compl_sp) if _det_compl_sp is not None else None
 
-    # Query historical arbs from DB to boost score
+    # Query historical arbs from DB to boost score (cached)
     _hist_arb_count = 0
     _hist_avg_edge = None
     try:
-        from dashboard.data_layer import _sqlite_conn as _gsc_det
-        _det_conn = _gsc_det()
-        if _det_conn:
-            _arb_hist_row = _det_conn.execute(
-                """
-                SELECT COUNT(*) as arb_count, AVG(net_edge_cents) as avg_edge
-                FROM arbs
-                WHERE ticker LIKE ?
-                  AND created_at >= datetime('now', '-30 days')
-                """,
-                (f"{ticker}%",),
-            ).fetchone()
-            _det_conn.close()
-            if _arb_hist_row and _arb_hist_row[0]:
-                _hist_arb_count = int(_arb_hist_row[0])
-                _hist_avg_edge = float(_arb_hist_row[1]) if _arb_hist_row[1] is not None else None
+        from dashboard.data_layer import get_ticker_arb_history as _gtah
+        _hist_data = _gtah(ticker)
+        _hist_arb_count = _hist_data.get("count", 0)
+        _hist_avg_edge = _hist_data.get("avg_edge")
     except Exception:
         pass
 
@@ -779,17 +865,17 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
     _boosted_arb_score = (_det_arb_score or 0.0) + _hist_boost
 
     _arb_score_str = f"+{_boosted_arb_score*100:.1f}c" if _boosted_arb_score > 0 else "--"
-    st.metric("ARB SCORE", _arb_score_str, help="max(0, 1 - (yes_ask + no_ask)) × 100 + historical arb boost (up to +20pts). Positive = potential complement arb profit in cents.")
+    st.metric("ARB SCORE", _arb_score_str, help="max(0, 1 - (yes_ask + no_ask)) × 100 + historical arb boost (up to +20pts). Positive = quotes below parity (feed/rounding artifact — Kalshi YES/NO always sum ≥ $1.00 live).")
     st.caption("ARB SCORE = complement gap (0-40pts) + volume rank (0-30pts) + spread tightness (0-30pts) · max=100")
 
     # Historical Arb Count metric and status message
-    st.metric("Historical Arb Count", f"{_hist_arb_count:,}",
-              help="Number of real arb detections for this ticker in the last 30 days (from arbs table).")
+    st.metric("Historical Detection Count", f"{_hist_arb_count:,}",
+              help="Scanner detections for this ticker in the last 30 days (from arbs table; YNC records are feed artifacts).")
     if _hist_arb_count > 0:
         _edge_str = f" · avg edge {_hist_avg_edge:.1f}¢" if _hist_avg_edge is not None else ""
-        st.success(f"✅ This market has historically produced real arbs (Based on {_hist_arb_count} historical arbs{_edge_str})")
+        st.caption(f"📋 {_hist_arb_count} historical scanner detections{_edge_str} (ME/TH arbs are actionable; YNC feed artifacts inflate avg edge)")
     else:
-        st.info("No arbs detected for this market yet")
+        st.info("No detections for this market yet")
 
     # --- Spread Quality Score (bid/ask spread as market tightness proxy) -----
     try:
@@ -1064,7 +1150,7 @@ for c in health_components
                         unsafe_allow_html=True,
                     )
                     st.dataframe(_rel_final, use_container_width=True, hide_index=True)
-                    st.caption("Other markets in the same event — check for collective exhaustiveness opportunities")
+                    st.caption("Other markets in the same event — CE (collectively exhaustive) scanning currently disabled")
     except Exception:
         pass
 
@@ -1149,4 +1235,5 @@ Returns (score, [component_labels]).
         components.append("ARB ACTIVE")
 
     return min(100, score), components
+
 

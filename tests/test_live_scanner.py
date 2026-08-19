@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_scanner.py
 ==========================
 Unit tests for arbitrage/live_scanner.py.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/live_scanner.py
 WebSocket-driven live arbitrage scanner.
 

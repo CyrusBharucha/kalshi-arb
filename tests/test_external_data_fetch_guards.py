@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_external_data_fetch_guards.py
 ==========================================
 Unit tests for data/external_market_data.py guarded fetch functions:

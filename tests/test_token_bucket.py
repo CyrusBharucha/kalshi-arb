@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_token_bucket.py
 ============================
 Unit tests for data/kalshi_client.py TokenBucket class.

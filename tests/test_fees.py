@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_fees.py
 Tests for the fee calculation module.
 These are the most critical unit tests - fee errors directly corrupt P&L calculations.

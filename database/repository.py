@@ -39,15 +39,21 @@ def get_engine():
     if _engine is None:
         _engine = create_engine(
             config.DB_URL,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=5,
+            max_overflow=10,
             pool_pre_ping=True,
-            # Keep connections alive during long bulk inserts
-            pool_recycle=3600,
-            # Cap individual query execution to 10 seconds (10000 ms).
-            # Without this, a slow Neon cold-start or runaway query can block
-            # the l2-writer thread indefinitely, stalling the WS pipeline.
-            connect_args={"options": "-c statement_timeout=10000"},
+            # Recycle before Neon's 5-min idle-connection timeout so the pool
+            # never hands out a connection Neon already closed server-side.
+            pool_recycle=240,
+            # TCP keepalives keep the connection warm through NAT/firewall idle
+            # timeouts and reduce Neon cold-start frequency.
+            connect_args={
+                "options": "-c statement_timeout=5000",
+                "keepalives": 1,
+                "keepalives_idle": 60,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            },
         )
     return _engine
 
@@ -224,18 +230,20 @@ def log_ingestion(session: Session, **kwargs) -> None:
 def get_all_open_markets(session: Session) -> pd.DataFrame:
     """Return all open markets with their latest snapshot prices."""
     sql = text("""
+        WITH latest_snaps AS (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_bid, yes_ask, no_bid, no_ask,
+                last_price, volume, open_interest, snapshot_ts
+            FROM market_snapshots
+            ORDER BY market_id, snapshot_ts DESC
+        )
         SELECT
             m.market_id, m.ticker, m.event_ticker, m.series_ticker,
             m.title, m.category, m.close_time,
             s.yes_bid, s.yes_ask, s.no_bid, s.no_ask,
             s.last_price, s.volume, s.open_interest, s.snapshot_ts
         FROM markets m
-        LEFT JOIN LATERAL (
-            SELECT * FROM market_snapshots
-            WHERE market_id = m.market_id
-            ORDER BY snapshot_ts DESC
-            LIMIT 1
-        ) s ON TRUE
+        LEFT JOIN latest_snaps s ON m.market_id = s.market_id
         WHERE m.status IN ('open','active')
         ORDER BY m.event_ticker, m.ticker
     """)
@@ -244,15 +252,17 @@ def get_all_open_markets(session: Session) -> pd.DataFrame:
 
 def get_markets_by_event(session: Session, event_ticker: str) -> pd.DataFrame:
     sql = text("""
+        WITH latest_snaps AS (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_bid, yes_ask, no_bid, no_ask,
+                last_price, volume, open_interest, snapshot_ts
+            FROM market_snapshots
+            ORDER BY market_id, snapshot_ts DESC
+        )
         SELECT m.*, s.yes_bid, s.yes_ask, s.no_bid, s.no_ask,
                s.last_price, s.volume, s.open_interest, s.snapshot_ts
         FROM markets m
-        LEFT JOIN LATERAL (
-            SELECT yes_bid, yes_ask, volume, open_interest, snapshot_ts
-            FROM market_snapshots
-            WHERE market_id = m.market_id
-            ORDER BY snapshot_ts DESC LIMIT 1
-        ) s ON TRUE
+        LEFT JOIN latest_snaps s ON m.market_id = s.market_id
         WHERE m.event_ticker = :event_ticker
         ORDER BY m.floor_strike NULLS LAST, m.ticker
     """)
@@ -342,17 +352,18 @@ def get_historical_arbitrage_summary(
 
 def get_event_market_matrix(session: Session, event_ticker: str) -> pd.DataFrame:
     sql = text("""
+        WITH latest_snaps AS (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_bid, yes_ask, volume, open_interest, snapshot_ts
+            FROM market_snapshots
+            ORDER BY market_id, snapshot_ts DESC
+        )
         SELECT
             m.market_id, m.ticker, m.title, m.floor_strike, m.cap_strike,
             s.yes_bid, s.yes_ask, s.volume, s.open_interest,
             s.snapshot_ts
         FROM markets m
-        INNER JOIN LATERAL (
-            SELECT yes_bid, yes_ask, volume, open_interest, snapshot_ts
-            FROM market_snapshots
-            WHERE market_id = m.market_id
-            ORDER BY snapshot_ts DESC LIMIT 1
-        ) s ON TRUE
+        JOIN latest_snaps s ON m.market_id = s.market_id
         WHERE m.event_ticker = :event_ticker
           AND m.status IN ('open','active')
           AND s.yes_ask IS NOT NULL

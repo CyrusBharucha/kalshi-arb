@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_ws_bridge.py
 ========================
 Unit tests for dashboard/ws_bridge.py:

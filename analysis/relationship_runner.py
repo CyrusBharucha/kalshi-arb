@@ -1,4 +1,4 @@
-﻿"""
+"""
 analysis/relationship_runner.py
 Run the relationship detector across the full Kalshi market universe.
 

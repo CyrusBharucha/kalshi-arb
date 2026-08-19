@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_persist_violations_extended.py
 ==========================================
 Extended unit tests for analysis/run_empirical.persist_violations().

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_historical_scanner_logic.py
 ========================================
 Unit tests for the pure-logic functions in arbitrage/historical_scanner.py:

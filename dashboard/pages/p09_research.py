@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/pages/p09_research.py
 ================================
 Empirical Research Findings page.
@@ -21,7 +21,7 @@ from dashboard.data_layer import (
     get_research_summary, get_relationship_stats,
     get_historical_arb_stats, get_arb_edge_by_strategy_class,
     get_arb_rolling_7d, get_top_markets_by_volume, get_market_price_history,
-    get_arb_by_category,
+    get_arb_by_category, get_arb_store_stats, get_arb_drought_timestamps,
 )
 from dashboard.styles import plotly_dark_layout, GREEN, RED, AMBER, BLUE, CYAN, TEXT, TEXT2, TEXT3, PANEL, BORDER, PANEL2
 
@@ -59,13 +59,45 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
     _health = get_system_health()
     _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
 
+    # Check Neon availability for banner
+    _p09_neon_ok = False
+    try:
+        import dashboard.live_arb_store as _las_p09
+        _p09_neon_ok = (
+            bool(getattr(_las_p09, "_pg_ok", False))
+            or (getattr(_las_p09, "_pg_engine", None) is not None)
+        )
+        if not _p09_neon_ok:
+            _p09_neon_ok = _las_p09.get_pg_engine_cached() is not None
+    except Exception:
+        pass
+    # Fallback: sidebar already connected and stored result in session_state
+    if not _p09_neon_ok:
+        _p09_neon_ok = bool(st.session_state.get("_sidebar_neon_ok", False))
+
     # --- Info banner -----
-    if _is_sqlite:
+    if _p09_neon_ok:
+        _p09_neon_count = 0
+        try:
+            from dashboard.data_layer import get_live_arbs_cloud_stats as _p09_cls
+            _p09_neon_count = _p09_cls().get("total_count", 0) or 0
+        except Exception:
+            pass
+        _p09_count_str = f"{_p09_neon_count:,} arbs logged" if _p09_neon_count > 0 else "arbs logged to Neon"
+        st.markdown(
+            f"<div style='background:{PANEL};border:1px solid {GREEN};border-left:4px solid {GREEN};"
+            f"padding:0.65rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-size:0.72rem;"
+            f"color:{TEXT2};font-family:JetBrains Mono,monospace;line-height:1.6;'>"
+            f"<span style='color:{GREEN};'>● NEON CLOUD</span> · {_p09_count_str} · ME/TH strategies · "
+            f"YNC + ME + TH scanners active (CE disabled)</div>",
+            unsafe_allow_html=True,
+        )
+    elif _is_sqlite:
         st.markdown(
             f"<div style='background:{PANEL};border:1px solid {AMBER};border-left:4px solid {AMBER};"
             f"padding:0.65rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-size:0.72rem;"
             f"color:{TEXT2};font-family:JetBrains Mono,monospace;line-height:1.6;'>"
-            f"Research platform · live arb scanner active · reference DB loaded</div>",
+            f"Research platform · YNC + ME + TH scanners active (CE disabled) · reference DB loaded</div>",
             unsafe_allow_html=True,
         )
 
@@ -121,7 +153,8 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
             _hod_exp_conn = _gsc_hod_exp()
             if _hod_exp_conn:
                 _hod_exp_rows = _hod_exp_conn.execute(
-                    "SELECT detected_at FROM arbitrage_opportunities WHERE detected_at IS NOT NULL"
+                    "SELECT detected_at FROM arbitrage_opportunities WHERE detected_at IS NOT NULL "
+                    "AND strategy_type != 'collectively_exhaustive'"
                 ).fetchall()
                 _hod_exp_conn.close()
                 if _hod_exp_rows:
@@ -152,6 +185,7 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
                     "COUNT(*) AS cnt "
                     "FROM arbitrage_opportunities "
                     "WHERE strategy_type IS NOT NULL AND gross_edge_cents IS NOT NULL "
+                    "AND strategy_type != 'collectively_exhaustive' "
                     "GROUP BY strategy_type ORDER BY avg_net DESC"
                 ).fetchall()
                 _fi_exp_conn.close()
@@ -185,7 +219,7 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
 
     # --- Tabs -----
     t1, t2, t3, t4, t5, t6, t7 = st.tabs([
-        "RELATIONSHIPS", "STRATEGY PERFORMANCE", "ARB FINDINGS",
+        "RELATIONSHIPS", "STRATEGY PERFORMANCE", "DETECTION FINDINGS",
         "DATA COVERAGE", "CROSS-ASSET", "PRICE HISTORY", "METHODOLOGY",
     ])
 
@@ -224,26 +258,29 @@ The `ws_bridge.py` scanner processes each message on a 1-second cycle.
 
 ### 2. Strategy Detection
 - **YNC (YES/NO Complement)**: Detects when YES ask + NO ask < $1.00 on the same contract after fees.
-  Kalshi guarantees exactly one leg pays $1.00, so buying both sides at a combined cost below $1.00 is risk-free.
-
-CE, ME, TH, and SS strategies were implemented and tested but are currently disabled — they produced too many
-false positives due to Kalshi API metadata inconsistencies. YNC remains because it is structurally unambiguous:
-no external validation is needed beyond live bid/ask prices.
+  In practice, Kalshi prices YES and NO as complements (NO ask = 1 − YES bid), so sum = 1 + spread ≥ $1.00 always — YNC detections are feed/rounding artifacts only, not executable.
+- **ME (Mutually Exclusive)**: Detects when the sum of NO asks across all outcomes of one event is below N−1.
+  Buying all NO legs costs < N−1, guaranteeing a $1 net payout when exactly one outcome resolves YES.
+- **TH (Threshold Order)**: Detects when a superset YES leg + subset NO leg are mispriced (monotonicity violation).
+- **CE (Collectively Exhaustive)**: Disabled — CE scanning is currently off pending false-positive review.
+  CE arbs (sum of YES asks < $1.00 across all event outcomes) would be the primary viable opportunity once re-enabled.
 
 ### 3. Fee Calculation
 Uses Kalshi's canonical fee: `min($0.035, ceil(0.07 × P × (1−P) × 100) / 100)` per contract.
 Ceil (not round) ensures conservative fee estimates. Net edge must clear **2¢** after both legs' fees.
 
-### 4. Validation Gates (YNC)
-Each detected opportunity passes 4 sequential checks before being logged:
-- **Gate 1**: Numeric — YES ask + NO ask < 1.00; net edge ≥ 2¢ after fees; gross < 10¢ sanity cap
-- **Gate 2**: Price floor — both asks above 5¢ (eliminates stale near-zero quotes)
-- **Gate 3**: Min-tick illiquidity — blocked if either leg quotes at the 1¢ Kalshi minimum tick
+### 4. Validation Gates (YNC / ME / TH)
+Each detected opportunity passes sequential checks before being logged. Gate 1 varies by strategy; Gates 2–4 are shared:
+- **Gate 1 (YNC)**: YES ask + NO ask < 1.00; net edge ≥ 2¢ after fees; gross < 10¢ sanity cap
+- **Gate 1 (ME)**: Σ NO asks < N−1 (N = leg count); net edge ≥ 2¢; all legs must have fresh Synthesis quotes
+- **Gate 1 (TH)**: Superset YES ask + subset NO ask < 1.00; monotonicity check; gross ≤ 10¢
+- **Gate 2**: Price floor — all asks above 5¢ (eliminates stale near-zero quotes)
+- **Gate 3**: Min-tick illiquidity — blocked if any leg quotes at the 1¢ Kalshi minimum tick
 - **Gate 4**: TTL dedup — same opportunity re-logged at most once per 5 minutes
 
 ### 5. Classification
-- **Class A**: Live L2 orderbook confirmed — executable right now
-- **Class B**: Snapshot-derived — likely executable, verify before trading
+- **Class A**: Live L2 orderbook confirmed — executable right now (ME/TH arbs only; YNC cannot be executable by construction)
+- **Class B**: Snapshot-derived — likely executable, verify before trading (ME/TH arbs only)
 - **Class C**: Trade-tape derived — historical evidence, no guarantee
 """)
 
@@ -301,7 +338,7 @@ logical constraints derived from event definitions and contract rules.
     _thresh_ct = f"{rel_stats.get('threshold_order',  {}).get('count', 0):,}" if rel_stats else "—"
     st.markdown(f"""
 **Relationship detection methodology (3 types detected):**
-- **Complement** ({_compl_ct} pairs): Two contracts whose YES prices must sum to ~100¢ by construction. Any sustained deviation is a risk-free arb.
+- **Complement** ({_compl_ct} pairs): Two contracts whose YES prices must sum to ~100¢ by construction. YES+NO always sum ≥ $1.00 live on Kalshi — any apparent deviation is a feed/rounding artifact, not an executable arb.
 - **Superset** ({_sups_ct} pairs): Superset outcome structurally includes subset. Superset must be priced ≥ subset at all times.
 - **Threshold order** ({_thresh_ct} pairs): Adjacent threshold-strike contracts with forced price monotonicity. Price inversions yield risk-free spread trades.
 """)
@@ -310,15 +347,15 @@ logical constraints derived from event definitions and contract rules.
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.4rem;'>LIVE COMPLEMENT ARB CANDIDATES (WS FEED)</div>",
+        f"color:{TEXT3};margin-bottom:0.4rem;'>LIVE YES/NO SPREAD MONITOR (WS FEED — YNC structural: always ≥ $1.00)</div>",
         unsafe_allow_html=True,
     )
     _badge("OBSERVED", GREEN)
     st.markdown(
         "<span style='font-size:0.7rem;color:" + TEXT2 + ";'>Markets ranked by <b>yes_ask + no_ask</b> "
-        "closest to 1.00. Any row where the sum is below 1.00 is a profitable complement arb "
-        "(buy YES + buy NO costs less than the guaranteed $1 payout). "
-        "Sum above 1.00 means both legs are overpriced.</span>",
+        "closest to 1.00. Any row where the sum is below 1.00 is a feed/rounding artifact — "
+        "Kalshi YES/NO are structurally complementary so live round-trip cost is always ≥ $1.00. "
+        "Sum above 1.00 is normal (bid-ask spread).</span>",
         unsafe_allow_html=True,
     )
     try:
@@ -351,14 +388,14 @@ logical constraints derived from event definitions and contract rules.
             if _n_prof:
                 st.markdown(
                     f"<div style='color:{GREEN};font-family:JetBrains Mono,monospace;font-size:0.7rem;"
-                    f"margin-bottom:0.3rem;'>● {_n_prof} PROFITABLE complement arb(s) detected live</div>",
+                    f"margin-bottom:0.3rem;'>● {_n_prof} quote(s) below parity (feed/rounding artifact — not executable)</div>",
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
                     f"<div style='color:{TEXT3};font-family:JetBrains Mono,monospace;font-size:0.7rem;"
-                    f"margin-bottom:0.3rem;'>No profitable complement arbs detected live. "
-                    f"Top rows below are closest to 1.00.</div>",
+                    f"margin-bottom:0.3rem;'>No quotes below parity live. "
+                    f"Top rows below are closest to 1.00 (all ≥ $1.00 as expected).</div>",
                     unsafe_allow_html=True,
                 )
             _df_rel_show = _df_rel.head(20).copy()
@@ -376,8 +413,8 @@ logical constraints derived from event definitions and contract rules.
             st.dataframe(
                 _df_rel_show.rename(columns={
                     "ticker": "TICKER", "yes_ask": "YES ASK", "no_ask": "NO ASK",
-                    "sum": "SUM", "gap_to_arb": "GAP TO ARB (1−SUM)",
-                    "potential_profit_cents": "POTENTIAL PROFIT",
+                    "sum": "SUM", "gap_to_arb": "GAP FROM PARITY (1−SUM)",
+                    "potential_profit_cents": "FEED ARTIFACT (¢)",
                     "age_s": "QUOTE AGE",
                 }),
                 use_container_width=True,
@@ -386,8 +423,7 @@ logical constraints derived from event definitions and contract rules.
             )
             st.caption(
                 f"Showing top 20 of {len(_df_rel):,} tracked markets. "
-                "Kalshi taker fee ~3¢/contract; net edge must exceed fees. "
-                "Stale quotes (>60s) may not be fillable at stated price."
+                "Live YES+NO always sums ≥ $1.00 structurally — any below-parity row is a feed/rounding artifact, not an executable opportunity."
             )
         else:
             _no_data_panel(
@@ -405,9 +441,9 @@ def _render_strategy_performance(summary: dict, hist_stats: dict):
         f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {AMBER};
 padding:0.65rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-size:0.72rem;
 color:{TEXT2};line-height:1.6;'>
-<b style='color:{AMBER};letter-spacing:0.06em;'>DATA SOURCE: HISTORICAL REFERENCE DB</b><br>
-All figures below are <b>historical</b> — computed from the reference SQLite snapshot
-(opportunities detected during a prior ingestion run, not a live session).
+<b style='color:{AMBER};letter-spacing:0.06em;'>DATA SOURCE: NEON CLOUD / HISTORICAL REFERENCE</b><br>
+All figures below are <b>historical</b> — computed from arbs logged to Neon cloud
+(opportunities detected during live ingestion runs, ME/TH strategies, anti-ghost filter applied).
 Live session stats (current WebSocket feed) appear in the DATA COVERAGE tab.
 No real capital was deployed. All edge values represent simulated outcomes
 under idealized assumptions (immediate execution at stated price, no queue).
@@ -463,7 +499,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
         except Exception:
             pass
         st.caption(
-            f"n={len(pct_df):,} rows · Historical data from {_strat_date}. High P95 edge values may reflect brief sub-second opportunities."
+            f"n={len(pct_df):,} rows · Historical data from {_strat_date}. High P95 edge values may reflect brief sub-second opportunities. YNC rows are feed artifacts (not executable)."
         )
 
         # --- Strategy avg net edge bar chart -----
@@ -512,7 +548,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
             st.dataframe(
                 df.rename(columns={
                     "strategy": "STRATEGY", "class": "CLASS",
-                    "count": "OPPORTUNITIES",
+                    "count": "DETECTIONS",
                     "avg_edge_cents": "AVG EDGE", "max_edge_cents": "MAX EDGE",
                 }),
                 use_container_width=True, height=250, hide_index=True,
@@ -536,6 +572,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
                 "SELECT DATE(detected_at) AS day, COUNT(*) AS cnt "
                 "FROM arbitrage_opportunities "
                 "WHERE detected_at >= DATE('now', '-30 days') "
+                "AND strategy_type != 'collectively_exhaustive' "
                 "GROUP BY DATE(detected_at) ORDER BY day"
             ).fetchall()
             _c30.close()
@@ -546,7 +583,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
             _fig30 = go.Figure()
             _fig30.add_trace(go.Bar(
                 x=_trend30_df["day"], y=_trend30_df["count"],
-                name="Daily Arbs", marker_color=CYAN, marker_line_width=0, opacity=0.65,
+                name="Daily Detections", marker_color=CYAN, marker_line_width=0, opacity=0.65,
             ))
             _fig30.add_trace(go.Scatter(
                 x=_trend30_df["day"], y=_trend30_df["count"].rolling(7, min_periods=1).mean(),
@@ -554,14 +591,14 @@ under idealized assumptions (immediate execution at stated price, no queue).
                 line={"color": AMBER, "width": 1.8},
             ))
             _fig30.update_layout(**plotly_dark_layout(
-                title={"text": "ARB DETECTIONS PER DAY — LAST 30 DAYS", "font": {"size": 10, "color": TEXT3}},
+                title={"text": "DETECTIONS PER DAY — LAST 30 DAYS (ALL STRATEGIES: YNC + ME + TH)", "font": {"size": 10, "color": TEXT3}},
                 height=240, xaxis_title="",
                 yaxis={"title": "Count"},
                 legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                 margin={"l": 45, "r": 20, "t": 35, "b": 30},
             ))
             st.plotly_chart(_fig30, use_container_width=True)
-            st.caption(f"Real DB data — {_trend30_df['count'].sum():,} arbs over last 30 days.")
+            st.caption(f"Real DB data — {_trend30_df['count'].sum():,} detections over last 30 days (all strategies; YNC records are feed artifacts — ME/TH are actionable).")
         else:
             st.info("No detection data in the last 30 days.")
     except Exception:
@@ -575,7 +612,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=rolling_df["day"], y=rolling_df["count"],
-            name="Daily Opps", marker_color=BLUE, marker_line_width=0, opacity=0.5,
+            name="Daily Detections", marker_color=BLUE, marker_line_width=0, opacity=0.5,
         ))
         if "rolling_7d_count" in rolling_df.columns:
             fig.add_trace(go.Scatter(
@@ -592,7 +629,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
             ))
         fig.update_layout(
             **plotly_dark_layout(
-            title={"text": "OPPORTUNITY FREQUENCY & EDGE TREND", "font": {"size": 10, "color": TEXT3}},
+            title={"text": "DETECTION FREQUENCY & EDGE TREND (ALL STRATEGIES — YNC + ME + TH)", "font": {"size": 10, "color": TEXT3}},
             height=280, xaxis_title="",
             yaxis={"title": "Count"},
             yaxis2={"title": "Avg Edge (c)", "overlaying": "y", "side": "right",
@@ -614,7 +651,8 @@ under idealized assumptions (immediate execution at stated price, no queue).
 
 
 def _render_arb_findings(hist_stats: dict, summary: dict):
-    st.markdown("#### ARBITRAGE DETECTION FINDINGS")
+    st.markdown("#### DETECTION FINDINGS (ME/TH arbs · YNC feed artifacts)")
+    _asts_af = get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0)
 
     # --- Validation methodology note -----
     st.markdown(
@@ -625,11 +663,11 @@ text-transform:uppercase;margin-bottom:4px;'>VALIDATION METHODOLOGY</div>
 <div style='font-size:0.72rem;color:{TEXT2};line-height:1.6;'>
 Every detected opportunity passes a multi-gate validation pipeline before being classified as real:
 (1) gross edge &gt; 0 after summing leg costs, (2) fee-adjusted net edge &gt; threshold,
-(3) stale-book guard (quote age &lt; 60s for CE legs), (4) sports-market filter (excluded categories),
+(3) stale-book guard (quote age &lt; 60s for ME/TH legs; CE scanner currently disabled), (4) sports-market filter (excluded categories),
 (5) L2 depth walk (executable quantity &gt; 0 at stated price levels),
 (6) deduplication (same event suppressed for 5 min — Gate 5 TTL), and
 (7) high-edge sanity check (net &gt; 50¢ flagged as pre-fix suspect).
-CE arbs additionally pass all 12 gates of the CE scanner (documented in the Methodology tab).
+ME/TH arbs pass all validation gates before being persisted. YNC records are feed artifacts (not executable) — also persisted for research (documented in the Methodology tab).
 </div>
 </div>""",
         unsafe_allow_html=True,
@@ -661,7 +699,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
     )
     _kf_html = (
         "<div style='display:grid;grid-template-columns:repeat(5,1fr);gap:0.5rem;margin-bottom:1rem;'>"
-        + _kf("PRICING VIOLATIONS", f"{_total_opps:,}", AMBER, "gross edge > 0")
+        + _kf("DETECTIONS (GROSS>0)", f"{_total_opps:,}", AMBER, "all strategies incl. YNC feed artifacts")
         + _kf("SURVIVED FEE FILTER", f"{_fee_survived:,}", BLUE, "net edge > fee")
         + _kf("L2 CONFIRMED (CLASS A)", f"{_l2_confirmed:,}", GREEN, "executable qty > 0")
         + _kf("MEDIAN NET EDGE", f"{_median_edge:.2f}¢", CYAN, "after Kalshi fee")
@@ -669,6 +707,58 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         + "</div>"
     )
     st.markdown(_kf_html, unsafe_allow_html=True)
+
+    # --- Neon cloud supplementary panel (shown when analytics DB is empty) -----
+    _neon_n_all = int(_asts_af.get("n_all") or 0)
+    _neon_source = _asts_af.get("source", "")
+    if _neon_source == "neon_cloud" and _neon_n_all > 0:
+        # Fetch median/max edge from Neon for the research panel
+        _p09_med_edge = 0.0
+        _p09_max_edge = 0.0
+        _p09_strat_counts: dict = {}
+        try:
+            import dashboard.live_arb_store as _las_p09af
+            from sqlalchemy import text as _p09af_text
+            _p09af_eng = getattr(_las_p09af, "_pg_engine", None) or _las_p09af.get_pg_engine_cached()
+            if _p09af_eng is not None:
+                with _p09af_eng.connect() as _p09af_c:
+                    _p09af_r = _p09af_c.execute(_p09af_text(
+                        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY net_edge_cents), "
+                        "MAX(net_edge_cents) FROM live_arbs_cloud "
+                        "WHERE net_edge_cents > 0 AND strategy_type NOT IN "
+                        "('yes_no_complement','collectively_exhaustive')"
+                    )).fetchone()
+                    _p09af_sc = _p09af_c.execute(_p09af_text(
+                        "SELECT strategy_type, COUNT(*) FROM live_arbs_cloud "
+                        "WHERE strategy_type != 'collectively_exhaustive' "
+                        "GROUP BY strategy_type ORDER BY COUNT(*) DESC"
+                    )).fetchall()
+                if _p09af_r and _p09af_r[0]:
+                    _p09_med_edge = float(_p09af_r[0] or 0)
+                    _p09_max_edge = float(_p09af_r[1] or 0)
+                for _sc_r in (_p09af_sc or []):
+                    _p09_strat_counts[str(_sc_r[0])] = int(_sc_r[1])
+        except Exception:
+            pass
+        _neon_n_1h = int(_asts_af.get("n_1h") or 0)
+        _neon_n_24h = int(_asts_af.get("n_24h") or 0)
+        _neon_last = _asts_af.get("last_ts") or "--"
+        st.markdown(
+            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+            f"color:{GREEN};margin:0.5rem 0 0.3rem;'>● NEON CLOUD DETECTION STATS</div>",
+            unsafe_allow_html=True,
+        )
+        _nc1, _nc2, _nc3, _nc4, _nc5 = st.columns(5)
+        _nc1.metric("NEON TOTAL", f"{_neon_n_all:,}", help="ME/TH arbs logged to live_arbs_cloud (YNC excluded)")
+        _nc2.metric("LAST 24h", f"{_neon_n_24h:,}")
+        _nc3.metric("LAST 1h", f"{_neon_n_1h:,}")
+        _nc4.metric("MEDIAN EDGE", f"{_p09_med_edge:.2f}¢" if _p09_med_edge else "--")
+        _nc5.metric("PEAK EDGE", f"{_p09_max_edge:.2f}¢" if _p09_max_edge else "--")
+        if _p09_strat_counts:
+            _sc_parts = [f"{k.upper()}: {v:,}" for k, v in _p09_strat_counts.items()]
+            st.caption(f"Last detection: {_neon_last[:16] if _neon_last != '--' else '--'} UTC · " + " · ".join(_sc_parts))
+        else:
+            st.caption(f"Last detection: {_neon_last[:16] if _neon_last != '--' else '--'} UTC · source: Neon live_arbs_cloud")
 
     # --- Violation Rate metric -----
     _viol_rate_num = _total_opps
@@ -742,7 +832,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
             f"<div style='font-size:0.6rem;letter-spacing:0.08em;color:{TEXT3};"
-            f"text-transform:uppercase;margin-bottom:0.3rem;'>PATTERN BREAKDOWN (27 CE PATTERNS)</div>",
+            f"text-transform:uppercase;margin-bottom:0.3rem;'>PATTERN BREAKDOWN (27 CE PATTERNS — CE scanner currently disabled)</div>",
             unsafe_allow_html=True,
         )
         _pattern_data_shown = False
@@ -781,7 +871,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         if _edh_conn:
             _edh_rows = _edh_conn.execute(
                 "SELECT net_edge_cents, gross_edge_cents, classification FROM arbitrage_opportunities "
-                "WHERE net_edge_cents IS NOT NULL"
+                "WHERE net_edge_cents IS NOT NULL AND strategy_type != 'yes_no_complement' "
+                "AND strategy_type != 'collectively_exhaustive'"
             ).fetchall()
             _edh_conn.close()
             _edge_vals  = [float(r[0]) for r in _edh_rows if r[0] is not None]
@@ -822,10 +913,10 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 showlegend=True,
             ))
             _fig_edh.update_layout(**plotly_dark_layout(
-                title={"text": "NET EDGE DISTRIBUTION (ALL ARB OPPORTUNITIES)", "font": {"size": 10, "color": TEXT3}},
+                title={"text": "NET EDGE DISTRIBUTION (ME/TH ARBS — YNC excluded)", "font": {"size": 10, "color": TEXT3}},
                 height=200,
                 xaxis_title="Net edge (¢)",
-                yaxis_title="Arb count",
+                yaxis_title="ME/TH arb count",
                 barmode="overlay",
                 legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                 margin={"l": 45, "r": 20, "t": 35, "b": 40},
@@ -890,7 +981,10 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                     if _freq_conn:
                         _freq_rows = _freq_conn.execute(
                             "SELECT detected_at FROM arbitrage_opportunities "
-                            "WHERE detected_at IS NOT NULL ORDER BY detected_at"
+                            "WHERE detected_at IS NOT NULL "
+                            "AND strategy_type != 'yes_no_complement' "
+                            "AND strategy_type != 'collectively_exhaustive' "
+                            "ORDER BY detected_at"
                         ).fetchall()
                         _freq_conn.close()
                         if _freq_rows and len(_freq_rows) >= 5:
@@ -918,14 +1012,14 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                             st.markdown("<br>", unsafe_allow_html=True)
                             st.markdown(
                                 f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-                                f"color:{TEXT3};margin-bottom:0.3rem;'>ARB FREQUENCY ANALYSIS</div>",
+                                f"color:{TEXT3};margin-bottom:0.3rem;'>ME/TH ARB FREQUENCY ANALYSIS (YNC excluded)</div>",
                                 unsafe_allow_html=True,
                             )
                             _badge("OBSERVED", GREEN)
                             _fa1, _fa2, _fa3 = st.columns(3)
                             with _fa1:
-                                st.metric("MEDIAN TIME BETWEEN ARBS", _gap_label,
-                                          help="Median gap between consecutive arbs (real DB timestamps)")
+                                st.metric("MEDIAN TIME BETWEEN ME/TH ARBS", _gap_label,
+                                          help="Median gap between consecutive ME/TH arbs (YNC feed artifacts excluded)")
                             with _fa2:
                                 st.metric("PEAK HOUR (ET)", _peak_label)
                             with _fa3:
@@ -939,8 +1033,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                     _next_arb_label = f"~{int(_avg_gap_s)}s"
                                 else:
                                     _next_arb_label = "--"
-                                st.metric("NEXT ARB (AVG GAP)", _next_arb_label,
-                                          help="Expected time to next arb based on average inter-arb gap from historical data")
+                                st.metric("NEXT ME/TH ARB (AVG GAP)", _next_arb_label,
+                                          help="Expected time to next ME/TH arb (YNC feed artifacts excluded from calculation)")
 
                             # --- Arb velocity: arbs per hour over last 24h -----
                             try:
@@ -955,7 +1049,9 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                     _vel_conn = _gsc_vel()
                                     if _vel_conn:
                                         _vel_row = _vel_conn.execute(
-                                            "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ?",
+                                            "SELECT COUNT(*) FROM arbitrage_opportunities "
+                                            "WHERE detected_at >= ? AND strategy_type != 'yes_no_complement' "
+                                            "AND strategy_type != 'collectively_exhaustive'",
                                             (_cutoff_vel,),
                                         ).fetchone()
                                         _vel_conn.close()
@@ -965,8 +1061,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                     pass
                                 if _vel_count is not None:
                                     _arb_velocity = round(_vel_count / 24.0, 2)
-                                    st.metric("ARB VELOCITY (24H)", f"{_arb_velocity:.2f} arbs/hr",
-                                              help=f"Total arbs in last 24h ({_vel_count:,}) divided by 24 hours")
+                                    st.metric("ME/TH ARB VELOCITY (24H)", f"{_arb_velocity:.2f} arbs/hr",
+                                              help=f"ME/TH arbs in last 24h ({_vel_count:,}) divided by 24 hours (YNC feed artifacts excluded)")
                             except Exception:
                                 pass
 
@@ -986,16 +1082,16 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 ))
                                 _fig_dow.update_layout(
                                     **plotly_dark_layout(
-                                        title={"text": "ARB COUNT BY DAY OF WEEK (ET)", "font": {"size": 10, "color": TEXT3}},
+                                        title={"text": "ME/TH ARB COUNT BY DAY OF WEEK (ET)", "font": {"size": 10, "color": TEXT3}},
                                         height=220,
                                         xaxis_title="Day",
-                                        yaxis_title="Arb Count",
+                                        yaxis_title="ME/TH arb count",
                                         margin={"l": 40, "r": 20, "t": 35, "b": 40},
                                     )
                                 )
                                 st.plotly_chart(_fig_dow, use_container_width=True)
                                 _busiest_dow = _dow_labels[int(_dow_counts_raw.idxmax())]
-                                st.caption(f"Busiest day: {_busiest_dow} ({max(_dow_vals):,} arbs). Highlighted bar = most frequent.")
+                                st.caption(f"Busiest day: {_busiest_dow} ({max(_dow_vals):,} ME/TH arbs). Highlighted bar = most frequent. YNC feed artifacts excluded.")
                             except Exception:
                                 pass
 
@@ -1016,10 +1112,10 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 ))
                                 _fig_hod.update_layout(
                                     **plotly_dark_layout(
-                                        title={"text": "ARBS DETECTED BY HOUR OF DAY (ET)", "font": {"size": 10, "color": TEXT3}},
+                                        title={"text": "ME/TH ARBS BY HOUR OF DAY (ET)", "font": {"size": 10, "color": TEXT3}},
                                         height=240,
                                         xaxis_title="Hour (ET)",
-                                        yaxis_title="Arb Count",
+                                        yaxis_title="ME/TH arb count",
                                         margin={"l": 40, "r": 20, "t": 35, "b": 50},
                                     )
                                 )
@@ -1027,7 +1123,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 _busiest_hod = f"{_hod_labels[_hod_vals.index(_hod_max)]} ET"
                                 _quietest_nonzero = min((v for v in _hod_vals if v > 0), default=0)
                                 st.caption(
-                                    f"Peak hour: {_busiest_hod} ({_hod_max:,} arbs). "
+                                    f"Peak hour: {_busiest_hod} ({_hod_max:,} ME/TH arbs; YNC excluded). "
                                     "Low-activity hours may indicate when market makers are least attentive. "
                                     "Highlighted bar = most frequent."
                                 )
@@ -1041,7 +1137,9 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 if _sf_conn:
                                     _sf_rows = _sf_conn.execute(
                                         "SELECT strategy_type, COUNT(*) as cnt FROM arbitrage_opportunities "
-                                        "WHERE strategy_type IS NOT NULL GROUP BY strategy_type ORDER BY cnt DESC"
+                                        "WHERE strategy_type IS NOT NULL "
+                                        "AND strategy_type != 'collectively_exhaustive' "
+                                        "GROUP BY strategy_type ORDER BY cnt DESC"
                                     ).fetchall()
                                     _sf_conn.close()
                                     if _sf_rows:
@@ -1074,11 +1172,11 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                         ))
                                         _fig_sf.update_layout(
                                             **plotly_dark_layout(
-                                                title={"text": "STRATEGY FREQUENCY BREAKDOWN (% of all arbs)",
+                                                title={"text": "STRATEGY DETECTION FREQUENCY (YNC = feed artifacts)",
                                                        "font": {"size": 10, "color": TEXT3}},
                                                 height=220,
                                                 xaxis_title="Strategy",
-                                                yaxis_title="Arb Count",
+                                                yaxis_title="Detection Count",
                                                 margin={"l": 40, "r": 20, "t": 35, "b": 40},
                                             )
                                         )
@@ -1087,7 +1185,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                             "  |  ".join(
                                                 f"{row['label']}: {row['count']:,} ({row['pct']:.1f}%)"
                                                 for _, row in _sf_df.iterrows()
-                                            )
+                                            ) + "  ·  YNC detections are feed artifacts (not executable)"
                                         )
                             except Exception:
                                 pass
@@ -1101,7 +1199,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 if _eds_conn:
                     _eds_rows = _eds_conn.execute(
                         "SELECT strategy_type, net_edge_cents FROM arbitrage_opportunities "
-                        "WHERE strategy_type IS NOT NULL AND net_edge_cents IS NOT NULL"
+                        "WHERE strategy_type IS NOT NULL AND net_edge_cents IS NOT NULL "
+                        "AND strategy_type != 'collectively_exhaustive'"
                     ).fetchall()
                     _eds_conn.close()
                     if _eds_rows:
@@ -1144,7 +1243,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 textposition="outside",
                             ))
                             _fig_eds.update_layout(**plotly_dark_layout(
-                                title={"text": "MEDIAN NET EDGE BY STRATEGY", "font": {"size": 10, "color": TEXT3}},
+                                title={"text": "MEDIAN NET EDGE BY STRATEGY (YNC = feed artifact edge)", "font": {"size": 10, "color": TEXT3}},
                                 height=200,
                                 xaxis_title="Strategy",
                                 yaxis_title="Median Net Edge (¢)",
@@ -1174,11 +1273,11 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
             _badge("OBSERVED", GREEN)
             _fc1, _fc2, _fc3 = st.columns(3)
             with _fc1:
-                st.metric("Gross edge found", f"{_total_gross:.1f}¢", help="Sum of gross_edge_cents across all detected arbs")
+                st.metric("Gross edge found", f"{_total_gross:.1f}¢", help="Sum of gross_edge_cents across ME/TH arbs (YNC feed artifacts excluded)")
             with _fc2:
-                st.metric("Fees paid", f"{_total_fees:.1f}¢", help="gross_edge_cents − net_edge_cents")
+                st.metric("Fees paid", f"{_total_fees:.1f}¢", help="gross_edge_cents − net_edge_cents (ME/TH arbs only; YNC excluded)")
             with _fc3:
-                st.metric("Net retained", f"{_total_net:.1f}¢ ({_pct_retained:.1f}% of gross)", help="Sum of net_edge_cents after Kalshi taker fee")
+                st.metric("Net retained", f"{_total_net:.1f}¢ ({_pct_retained:.1f}% of gross)", help="Sum of net_edge_cents after Kalshi taker fee (ME/TH arbs only; YNC feed artifacts excluded)")
         elif not _edge_vals:
             pass  # already handled above
     except Exception:
@@ -1192,56 +1291,19 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         unsafe_allow_html=True,
     )
     _badge("OBSERVED", GREEN)
-    _fim_avg_fee = None
-    _fim_avg_ret = None
-    _fim_zero_ct = None
-    # Try PostgreSQL arbs table first
-    try:
-        from database.repository import get_engine as _ge_fim
-        from sqlalchemy import text as _txt_fim
-        _eng_fim = _ge_fim()
-        with _eng_fim.connect() as _conn_fim:
-            _fim_row = _conn_fim.execute(_txt_fim(
-                "SELECT AVG(gross_edge_cents - net_edge_cents) AS avg_fee_paid, "
-                "AVG(net_edge_cents / NULLIF(gross_edge_cents, 0)) AS avg_retention, "
-                "COUNT(*) FILTER (WHERE net_edge_cents <= 0) AS zero_net_count "
-                "FROM arbs"
-            )).fetchone()
-        if _fim_row:
-            _fim_avg_fee = float(_fim_row[0]) if _fim_row[0] is not None else None
-            _fim_avg_ret = float(_fim_row[1]) if _fim_row[1] is not None else None
-            _fim_zero_ct = int(_fim_row[2]) if _fim_row[2] is not None else None
-    except Exception:
-        pass
-    # Fall back to SQLite arbitrage_opportunities table
-    if _fim_avg_fee is None:
-        try:
-            from dashboard.data_layer import _sqlite_conn as _gsc_fim
-            _fimc = _gsc_fim()
-            if _fimc:
-                _fim_row2 = _fimc.execute(
-                    "SELECT AVG(gross_edge_cents - net_edge_cents) AS avg_fee_paid, "
-                    "AVG(CAST(net_edge_cents AS REAL) / NULLIF(CAST(gross_edge_cents AS REAL), 0)) AS avg_retention, "
-                    "SUM(CASE WHEN net_edge_cents <= 0 THEN 1 ELSE 0 END) AS zero_net_count "
-                    "FROM arbitrage_opportunities"
-                ).fetchone()
-                _fimc.close()
-                if _fim_row2:
-                    _fim_avg_fee = float(_fim_row2[0]) if _fim_row2[0] is not None else None
-                    _fim_avg_ret = float(_fim_row2[1]) if _fim_row2[1] is not None else None
-                    _fim_zero_ct = int(_fim_row2[2]) if _fim_row2[2] is not None else None
-        except Exception:
-            pass
+    _fim_avg_fee = _asts_af.get("avg_fee_paid")    if _asts_af else None
+    _fim_avg_ret = _asts_af.get("avg_retention")   if _asts_af else None
+    _fim_zero_ct = _asts_af.get("zero_net_count")  if _asts_af else None
     _fim_c1, _fim_c2, _fim_c3 = st.columns(3)
     with _fim_c1:
-        st.metric("Avg Fee Per Arb", f"{_fim_avg_fee:.2f}¢" if _fim_avg_fee is not None else "—",
-                  help="AVG(gross_edge_cents - net_edge_cents)")
+        st.metric("Avg Fee Per Detection", f"{_fim_avg_fee:.2f}¢" if _fim_avg_fee is not None else "—",
+                  help="AVG(gross_edge_cents - net_edge_cents) — all strategies incl. YNC feed artifacts")
     with _fim_c2:
         st.metric("Edge Retention %", f"{_fim_avg_ret*100:.1f}%" if _fim_avg_ret is not None else "—",
-                  help="AVG(net_edge_cents / gross_edge_cents)")
+                  help="AVG(net_edge_cents / gross_edge_cents) — all strategies incl. YNC feed artifacts")
     with _fim_c3:
-        st.metric("Zero-Net Arbs", f"{_fim_zero_ct:,}" if _fim_zero_ct is not None else "—",
-                  help="COUNT(*) WHERE net_edge_cents <= 0 (fees wiped the gross edge)")
+        st.metric("Zero-Net Detections", f"{_fim_zero_ct:,}" if _fim_zero_ct is not None else "—",
+                  help="COUNT(*) WHERE net_edge_cents <= 0 (fees wiped gross edge) — all strategies incl. YNC feed artifacts")
     if _fim_avg_ret is not None and _fim_avg_ret < 0.7:
         st.warning("Fees consuming >30% of gross edge — fee drag is significant")
 
@@ -1264,6 +1326,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 "COUNT(*) AS cnt "
                 "FROM arbitrage_opportunities "
                 "WHERE strategy_type IS NOT NULL AND gross_edge_cents IS NOT NULL "
+                "AND strategy_type != 'collectively_exhaustive' "
                 "GROUP BY strategy_type ORDER BY avg_net DESC"
             ).fetchall()
             _fi_strat_conn.close()
@@ -1302,15 +1365,15 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.3rem;'>MARKET PAIR CORRELATION (YNC ARBs)</div>",
+        f"color:{TEXT3};margin-bottom:0.3rem;'>MARKET PAIR CORRELATION (YES/NO SPREAD — STRUCTURAL)</div>",
         unsafe_allow_html=True,
     )
     _badge("OBSERVED", GREEN)
     st.markdown(
-        f"<span style='font-size:0.7rem;color:{TEXT2};'>For YES/NO Complement arbs, "
-        "YES ask and NO ask should be strongly negatively correlated (≈−1.0) because "
+        f"<span style='font-size:0.7rem;color:{TEXT2};'>For YES/NO pairs (structural complements), "
+        "YES ask and NO ask are strongly negatively correlated (≈−1.0) because "
         "they must sum to ≈$1.00. Correlation significantly above −1.0 suggests "
-        "independent mispricing — a signal of market maker inattention.</span>",
+        "transient feed/rounding noise — not an executable opportunity.</span>",
         unsafe_allow_html=True,
     )
     try:
@@ -1336,19 +1399,19 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                     _yc1.metric(
                         "YES/NO ASK CORRELATION",
                         f"{_ync_corr:.4f}",
-                        help="Pearson correlation between YES ask and NO ask across all YNC arbs. "
-                             "Healthy market: ≈ −1.0. Deviation = potential mispricing.",
+                        help="Pearson correlation between YES ask and NO ask across all YNC feed records. "
+                             "Healthy market: ≈ −1.0. Deviation = feed/rounding artifact or data anomaly (YNC is not executable — not a real mispricing signal).",
                     )
-                    _yc2.metric("YNC ARB RECORDS", f"{len(_ync_df):,}")
+                    _yc2.metric("YNC FEED RECORDS", f"{len(_ync_df):,}")
                     _sum_mean = float((_ync_df["yes_ask"] + _ync_df["no_ask"]).mean())
                     _yc3.metric("AVG YES+NO SUM", f"{_sum_mean:.4f}",
-                                help="Should be <1.00 for a profitable arb. Values well below 1.00 indicate larger mispricings.")
+                                help="Historical average. Live YES+NO always ≥ 1.00 (structural); values below 1.00 in DB are pre-fix feed artifacts.")
                     if _ync_corr < -0.95:
                         st.success(f"Correlation {_ync_corr:.4f} is near −1.0 — healthy market structure (prices move in lockstep).")
                     elif _ync_corr < -0.85:
-                        st.warning(f"Correlation {_ync_corr:.4f} deviates from −1.0 — moderate mispricing signal.")
+                        st.warning(f"Correlation {_ync_corr:.4f} deviates from −1.0 — feed/rounding artifact pattern or data anomaly (not an executable mispricing).")
                     else:
-                        st.error(f"Correlation {_ync_corr:.4f} significantly above −1.0 — strong mispricing or data anomaly.")
+                        st.error(f"Correlation {_ync_corr:.4f} significantly above −1.0 — strong data anomaly or feed artifact (YNC detections are never executable; not a mispricing opportunity).")
                     # Scatter: YES ask vs NO ask
                     _fig_ync = go.Figure()
                     _fig_ync.add_trace(go.Scatter(
@@ -1356,7 +1419,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                         y=_ync_df["no_ask"].tolist(),
                         mode="markers",
                         marker=dict(color=BLUE, size=5, opacity=0.5, line=dict(width=0)),
-                        name="YNC arbs",
+                        name="YNC detections (feed artifacts)",
                     ))
                     _ync_x = [float(_ync_df["yes_ask"].min()), float(_ync_df["yes_ask"].max())]
                     _fig_ync.add_trace(go.Scatter(
@@ -1375,11 +1438,11 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                         margin={"l": 50, "r": 20, "t": 35, "b": 40},
                     ))
                     st.plotly_chart(_fig_ync, use_container_width=True)
-                    st.caption("Green dashed line = YES + NO = 1.00. Points below the line are profitable complement arbs.")
+                    st.caption("Green dashed line = YES + NO = 1.00. Points below the line are historical feed artifacts (pre-fix scanner data).")
                 else:
-                    st.info("Insufficient YNC arb records after cleaning — need at least 5.")
+                    st.info("Insufficient YNC feed records after cleaning — need at least 5.")
             else:
-                st.info("No yes_no_complement arbs with yes_ask and no_ask columns found in database.")
+                st.info("No yes_no_complement records with yes_ask and no_ask columns found in database.")
         else:
             st.info("Database not connected — YNC correlation unavailable.")
     except Exception as _ync_err:
@@ -1443,13 +1506,13 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
 <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem;'>
 <div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;border-radius:3px;'>
 <div style='font-size:0.6rem;letter-spacing:0.08em;color:{TEXT3};text-transform:uppercase;'>
-CLASS A &mdash;CONFIRMED EXECUTABLE
+CLASS A &mdash;CONFIRMED EXECUTABLE (ME/TH)
 </div>
 <div style='font-family:JetBrains Mono,monospace;font-size:1.3rem;color:{GREEN};'>
 {class_a:,}
 </div>
 <div style='font-size:0.65rem;color:{TEXT2};'>
-Live bid/ask confirmed &mdash;executable at stated price
+Live bid/ask confirmed &mdash;executable at stated price (ME/TH arbs; YNC cannot be executable)
 </div>
 </div>
 <div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;border-radius:3px;'>
@@ -1471,8 +1534,8 @@ which likely explains the unusually large edge values.
     if hist_stats:
         _badge("OBSERVED", GREEN)
         rows = [
-            ("Total opportunities detected", f"{int(hist_stats.get('total_opportunities') or 0):,}"),
-            ("Confirmed executable (Class A)", f"{class_a:,}"),
+            ("Total detections (all strategies)", f"{int(hist_stats.get('total_opportunities') or 0):,}"),
+            ("Confirmed executable — Class A (ME/TH only; YNC cannot be executable)", f"{class_a:,}"),
             ("Median net edge", f"{float(hist_stats.get('median_edge_cents') or 0):.2f}c"),
             ("Mean net edge", f"{float(hist_stats.get('mean_edge_cents') or 0):.2f}c"),
             ("Maximum net edge", f"{float(hist_stats.get('max_edge_cents') or 0):.2f}c"),
@@ -1486,7 +1549,7 @@ which likely explains the unusually large edge values.
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
             f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-            f"color:{TEXT3};margin-bottom:0.3rem;'>ARB DETECTIONS TIMELINE</div>",
+            f"color:{TEXT3};margin-bottom:0.3rem;'>DETECTION TIMELINE (ALL STRATEGIES — YNC + ME + TH)</div>",
             unsafe_allow_html=True,
         )
         _badge("OBSERVED", GREEN)
@@ -1515,7 +1578,7 @@ which likely explains the unusually large edge values.
                 line={"color": AMBER, "width": 1.5, "dash": "dot"},
             ))
         _fig_tl.update_layout(**plotly_dark_layout(
-            title={"text": "ARB OPPORTUNITIES DETECTED BY DAY", "font": {"size": 10, "color": TEXT3}},
+            title={"text": "DETECTIONS BY DAY (ALL STRATEGIES — YNC + ME + TH)", "font": {"size": 10, "color": TEXT3}},
             height=240,
             xaxis_title="",
             yaxis_title="Opportunities",
@@ -1524,8 +1587,8 @@ which likely explains the unusually large edge values.
         ))
         st.plotly_chart(_fig_tl, use_container_width=True)
         st.caption(
-            f"Daily arb detection counts from the reference database. "
-            f"Each bar = opportunities passing all 7 validation gates on that day."
+            f"Daily detection counts from the reference database (all strategies: YNC feed artifacts + ME/TH arbs). "
+            f"Each bar = records passing all 7 validation gates on that day. Use the strategy breakdown below to isolate ME/TH."
         )
 
     # --- Arb by category breakdown -----
@@ -1535,7 +1598,7 @@ which likely explains the unusually large edge values.
         st.markdown(
             f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
             f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
-            f"ARB OPPORTUNITIES BY CATEGORY</div>",
+            f"DETECTIONS BY CATEGORY (YNC = feed artifact · ME/TH = actionable)</div>",
             unsafe_allow_html=True,
         )
         _badge("OBSERVED", GREEN)
@@ -1585,7 +1648,7 @@ and promoted to Class B (pending manual review) rather than Class A (actionable)
         unsafe_allow_html=True,
     )
 
-    st.info("CE scanning is disabled. Only YES/NO complement (YNC) arbs are detected.")
+    st.info("CE scanning is currently disabled. YNC, ME (mutually exclusive), and TH (threshold order) scanners run; CE arbs are the primary viable opportunity once re-enabled.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     _badge("UNVERIFIED", TEXT3)
@@ -1606,11 +1669,13 @@ def _render_data_coverage():
     from dashboard.data_layer import get_system_health, get_coverage_stats, get_historical_arb_stats
     health   = get_system_health()
     coverage = get_coverage_stats()
+    # Single cached CTE round-trip for all arb-store stats (trend, DQA, gate counts)
+    _asts = get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0)
     is_sqlite = not health.get("db_connected", False) and health.get("db_mode") == "sqlite"
 
     # Show historical arb count from reference DB
     hist = get_historical_arb_stats()
-    arb_label = "Arbitrage opps detected"
+    arb_label = "Detections in DB (all strategies — YNC feed artifacts + ME/TH arbs)"
     arb_val   = f"{int(hist.get('total_opportunities', 0)):,}" if is_sqlite else f"{int(health.get('arb_opportunities_open', 0) or 0):,}"
 
     def _dash_if_zero(v):
@@ -1626,6 +1691,29 @@ def _render_data_coverage():
         ("Canadian markets in DB",       f"{int(coverage.get('canadian_markets', 0)):,}"),
     ]
     _stat_table(rows)
+
+    # --- Neon cloud arb store stats -----
+    _neon_n_all = int(_asts.get("n_all", 0) or 0)
+    _neon_last_ts = _asts.get("last_ts") or "--"
+    _neon_source = _asts.get("source", "")
+    if _neon_n_all > 0:
+        _neon_avg_fee = _asts.get("avg_fee_paid")
+        _neon_avg_ret = _asts.get("avg_retention")
+        _fee_str = f"{_neon_avg_fee:.3f}¢" if _neon_avg_fee is not None else "--"
+        _ret_str = f"{_neon_avg_ret*100:.1f}%" if _neon_avg_ret is not None else "--"
+        st.markdown(
+            f"<div style='background:{PANEL};border:1px solid {GREEN};border-left:4px solid {GREEN};"
+            f"padding:0.65rem 1rem;border-radius:3px;margin:0.75rem 0;font-size:0.72rem;"
+            f"color:{TEXT2};font-family:JetBrains Mono,monospace;line-height:1.7;'>"
+            f"<span style='color:{GREEN};letter-spacing:0.08em;font-size:0.6rem;text-transform:uppercase;'>"
+            f"NEON CLOUD ARB STORE</span><br>"
+            f"<strong style='color:#E2E8F0;'>{_neon_n_all:,}</strong> ME/TH arbs logged"
+            f"&nbsp;·&nbsp;last: {_neon_last_ts[:16] if _neon_last_ts != '--' else '--'}"
+            f"&nbsp;·&nbsp;avg fee: {_fee_str}"
+            f"&nbsp;·&nbsp;avg edge retention: {_ret_str}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     # --- Live WS session stats -----
     try:
@@ -1651,8 +1739,8 @@ def _render_data_coverage():
             f"<span style='color:{_conn_color};'>{_conn_label}</span>"
             f"&nbsp;&nbsp;|&nbsp;&nbsp;MARKETS: {_ws_mkts_p09}"
             f"&nbsp;&nbsp;|&nbsp;&nbsp;MSG/S: {_ws_rate_p09:.1f}"
-            f"&nbsp;&nbsp;|&nbsp;&nbsp;SESSION ARBS: {_ws_n_total} "
-            f"(NON-CE: {_ws_n_comp} · CE: {_ws_n_ce})"
+            f"&nbsp;&nbsp;|&nbsp;&nbsp;SESSION DETECTIONS: {_ws_n_total} "
+            f"(YNC feed artifacts: {_ws_n_comp} · CE disabled: {_ws_n_ce})"
             f"{'&nbsp;&nbsp;|&nbsp;&nbsp;BEST EDGE: <span style=\"color:#22C55E;\">+' + f'{_ws_best_edge:.2f}c</span>' if _ws_best_edge > 0 else ''}"
             f"</div>",
             unsafe_allow_html=True,
@@ -1662,100 +1750,52 @@ def _render_data_coverage():
 
     # --- DETECTION TREND: arbs detected in last 1h / 24h / all-time -----
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.4rem;'>DETECTION TREND</div>",
-        unsafe_allow_html=True,
-    )
     _trend_ok = False
     try:
-        from datetime import datetime as _dt_trend, timezone as _tz_trend, timedelta as _td_trend
-        _now_trend = _dt_trend.now(_tz_trend.utc)
+        _asts = get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0)
+        if _asts:
+            _n_1h_t   = _asts.get("n_1h", 0)
+            _n_24h_t  = _asts.get("n_24h", 0)
+            _n_all_t  = _asts.get("n_all", 0)
+            _prev_1h  = _asts.get("n_prev_1h", None)
+            _prev_24h = _asts.get("n_prev_24h", None)
+            _trend_src = _asts.get("source", "pg")
+            _src_label = (
+                f"<span style='color:{GREEN};'>● NEON CLOUD</span>"
+                if _trend_src == "neon_cloud" else
+                "<span style='color:#94A3B8;'>● ANALYTICS DB</span>"
+            )
+            st.markdown(
+                f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                f"color:{TEXT3};margin-bottom:0.4rem;'>DETECTION TREND &nbsp; {_src_label}</div>",
+                unsafe_allow_html=True,
+            )
 
-        # Try PostgreSQL first (live DB with standard interval syntax)
-        _pg_trend_ok = False
-        try:
-            from database.repository import get_engine as _ge_trend
-            from sqlalchemy import text as _txt_trend
-            _eng_trend = _ge_trend()
-            with _eng_trend.connect() as _conn_trend:
-                _r_1h_pg  = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '1 hour'"
-                )).fetchone()
-                _r_24h_pg = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '24 hours'"
-                )).fetchone()
-                _r_all_pg = _conn_trend.execute(_txt_trend("SELECT COUNT(*) FROM arbs")).fetchone()
-                # Previous periods for deltas
-                _r_prev_1h_pg = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '2 hours' AND ts <= now() - interval '1 hour'"
-                )).fetchone()
-                _r_prev_24h_pg = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '48 hours' AND ts <= now() - interval '24 hours'"
-                )).fetchone()
-            _n_1h_t   = int(_r_1h_pg[0])      if _r_1h_pg  else 0
-            _n_24h_t  = int(_r_24h_pg[0])     if _r_24h_pg else 0
-            _n_all_t  = int(_r_all_pg[0])     if _r_all_pg else 0
-            _prev_1h  = int(_r_prev_1h_pg[0]) if _r_prev_1h_pg  else None
-            _prev_24h = int(_r_prev_24h_pg[0])if _r_prev_24h_pg else None
-            _pg_trend_ok = True
-        except Exception:
-            pass
+            def _delta_str(current, previous):
+                if previous is None:
+                    return None
+                diff = current - previous
+                return f"{diff:+,}" if diff != 0 else "0"
 
-        if not _pg_trend_ok:
-            # Fall back to SQLite reference DB
-            from dashboard.data_layer import _sqlite_conn as _gsc_trend
-            _tc = _gsc_trend()
-            _n_1h_t = _n_24h_t = _n_all_t = 0
-            _prev_1h = _prev_24h = None
-            if _tc:
-                _cutoff_1h  = (_now_trend - _td_trend(hours=1)).isoformat()
-                _cutoff_24h = (_now_trend - _td_trend(hours=24)).isoformat()
-                _cutoff_2h  = (_now_trend - _td_trend(hours=2)).isoformat()
-                _cutoff_48h = (_now_trend - _td_trend(hours=48)).isoformat()
-                _r_all = _tc.execute("SELECT COUNT(*) FROM arbitrage_opportunities").fetchone()
-                _r_24h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ?",
-                    (_cutoff_24h,),
-                ).fetchone()
-                _r_1h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ?",
-                    (_cutoff_1h,),
-                ).fetchone()
-                _r_p1h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ? AND detected_at < ?",
-                    (_cutoff_2h, _cutoff_1h),
-                ).fetchone()
-                _r_p24h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ? AND detected_at < ?",
-                    (_cutoff_48h, _cutoff_24h),
-                ).fetchone()
-                _tc.close()
-                _n_1h_t   = int(_r_1h[0])   if _r_1h   else 0
-                _n_24h_t  = int(_r_24h[0])  if _r_24h  else 0
-                _n_all_t  = int(_r_all[0])  if _r_all  else 0
-                _prev_1h  = int(_r_p1h[0])  if _r_p1h  else None
-                _prev_24h = int(_r_p24h[0]) if _r_p24h else None
+            _d1h  = _delta_str(_n_1h_t,  _prev_1h)
+            _d24h = _delta_str(_n_24h_t, _prev_24h)
 
-        # Compute deltas for display
-        def _delta_str(current, previous):
-            if previous is None:
-                return None
-            diff = current - previous
-            return f"{diff:+,}" if diff != 0 else "0"
-
-        _d1h  = _delta_str(_n_1h_t,  _prev_1h)
-        _d24h = _delta_str(_n_24h_t, _prev_24h)
-
-        _tc1, _tc2, _tc3 = st.columns(3)
-        _tc1.metric("LAST 1H",  f"{_n_1h_t:,}",  delta=_d1h,  help="vs previous 1h window")
-        _tc2.metric("LAST 24H", f"{_n_24h_t:,}", delta=_d24h, help="vs previous 24h window")
-        _tc3.metric("ALL TIME", f"{_n_all_t:,}")
-        _trend_ok = True
+            _tc1, _tc2, _tc3 = st.columns(3)
+            _tc1.metric("LAST 1H",  f"{_n_1h_t:,}",  delta=_d1h,  help="All detections vs previous 1h window (includes YNC feed artifacts; ME/TH are actionable)")
+            _tc2.metric("LAST 24H", f"{_n_24h_t:,}", delta=_d24h, help="All detections vs previous 24h window (includes YNC feed artifacts; ME/TH are actionable)")
+            _tc3.metric("ALL TIME", f"{_n_all_t:,}", help="All-time scanner detections (includes YNC feed artifacts)")
+            if _trend_src == "neon_cloud" and _asts.get("last_ts"):
+                st.caption(f"Source: Neon cloud live_arbs_cloud · last detection: {str(_asts['last_ts'])[:19]} UTC")
+            _trend_ok = True
     except Exception:
         pass
 
     if not _trend_ok:
+        st.markdown(
+            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+            f"color:{TEXT3};margin-bottom:0.4rem;'>DETECTION TREND</div>",
+            unsafe_allow_html=True,
+        )
         _tc1, _tc2, _tc3 = st.columns(3)
         _tc1.metric("LAST 1H",  "—")
         _tc2.metric("LAST 24H", "—")
@@ -1769,66 +1809,15 @@ def _render_data_coverage():
         f"color:{TEXT3};margin-bottom:0.4rem;'>DATA QUALITY AUDIT</div>",
         unsafe_allow_html=True,
     )
-    _dqa_total = 0
-    _dqa_null_net = 0
-    _dqa_invalid_gross = 0
-    _dqa_missing_strat = 0
-    _dqa_last_ts = None
-    _dqa_ok = False
-    # Try PostgreSQL arbs table first
-    try:
-        from database.repository import get_engine as _ge_dqa
-        from sqlalchemy import text as _txt_dqa
-        _eng_dqa = _ge_dqa()
-        with _eng_dqa.connect() as _conn_dqa:
-            _dqa_row = _conn_dqa.execute(_txt_dqa(
-                "SELECT COUNT(*) AS total, "
-                "COUNT(CASE WHEN net_edge_cents IS NULL THEN 1 END) AS null_net, "
-                "COUNT(CASE WHEN gross_edge_cents <= 0 THEN 1 END) AS invalid_gross, "
-                "COUNT(CASE WHEN strategy IS NULL OR strategy = '' THEN 1 END) AS missing_strategy "
-                "FROM arbs"
-            )).fetchone()
-            _dqa_ts_row = _conn_dqa.execute(_txt_dqa("SELECT MAX(ts) FROM arbs")).fetchone()
-        if _dqa_row:
-            _dqa_total          = int(_dqa_row[0] or 0)
-            _dqa_null_net       = int(_dqa_row[1] or 0)
-            _dqa_invalid_gross  = int(_dqa_row[2] or 0)
-            _dqa_missing_strat  = int(_dqa_row[3] or 0)
-        if _dqa_ts_row and _dqa_ts_row[0]:
-            _dqa_last_ts = str(_dqa_ts_row[0])[:19]
-        _dqa_ok = True
-    except Exception:
-        pass
-    # Fall back to SQLite arbitrage_opportunities table
-    if not _dqa_ok:
-        try:
-            from dashboard.data_layer import _sqlite_conn as _gsc_dqa
-            _dqa_conn = _gsc_dqa()
-            if _dqa_conn:
-                _dqa_row2 = _dqa_conn.execute(
-                    "SELECT COUNT(*) AS total, "
-                    "COUNT(CASE WHEN net_edge_cents IS NULL THEN 1 END) AS null_net, "
-                    "COUNT(CASE WHEN CAST(gross_edge_cents AS REAL) <= 0 THEN 1 END) AS invalid_gross, "
-                    "COUNT(CASE WHEN strategy_type IS NULL OR strategy_type = '' THEN 1 END) AS missing_strategy "
-                    "FROM arbitrage_opportunities"
-                ).fetchone()
-                _dqa_ts_row2 = _dqa_conn.execute(
-                    "SELECT MAX(detected_at) FROM arbitrage_opportunities"
-                ).fetchone()
-                _dqa_conn.close()
-                if _dqa_row2:
-                    _dqa_total         = int(_dqa_row2[0] or 0)
-                    _dqa_null_net      = int(_dqa_row2[1] or 0)
-                    _dqa_invalid_gross = int(_dqa_row2[2] or 0)
-                    _dqa_missing_strat = int(_dqa_row2[3] or 0)
-                if _dqa_ts_row2 and _dqa_ts_row2[0]:
-                    _dqa_last_ts = str(_dqa_ts_row2[0])[:19]
-                _dqa_ok = True
-        except Exception:
-            pass
+    _dqa_ok = bool(_asts)
+    _dqa_total         = _asts.get("total", 0)         if _asts else 0
+    _dqa_null_net      = _asts.get("null_net", 0)      if _asts else 0
+    _dqa_invalid_gross = _asts.get("invalid_gross", 0) if _asts else 0
+    _dqa_missing_strat = _asts.get("missing_strategy", 0) if _asts else 0
+    _dqa_last_ts       = _asts.get("last_ts")          if _asts else None
     if _dqa_ok:
         _dqa1, _dqa2, _dqa3, _dqa4 = st.columns(4)
-        _dqa1.metric("Total Records",     f"{_dqa_total:,}")
+        _dqa1.metric("Total Records",     f"{_dqa_total:,}", help="All DB records (includes YNC feed artifacts + ME/TH arbs)")
         _dqa2.metric("Null Net Edge",     f"{_dqa_null_net:,}",      help="Records where net_edge_cents IS NULL")
         _dqa3.metric("Invalid Gross",     f"{_dqa_invalid_gross:,}", help="Records where gross_edge_cents <= 0")
         _dqa4.metric("Missing Strategy",  f"{_dqa_missing_strat:,}", help="Records with no strategy type set")
@@ -1853,7 +1842,7 @@ def _render_data_coverage():
             except Exception:
                 _dqa_last_str = _dqa_last_ts
             st.metric("Last Ingested", _dqa_last_str)
-        st.caption("Data quality checks — these should all be low relative to total arb count")
+        st.caption("Data quality checks — these should all be low relative to total record count (includes YNC feed artifacts + ME/TH arbs)")
     else:
         st.caption("Data quality audit unavailable — database not connected.")
 
@@ -1864,85 +1853,31 @@ def _render_data_coverage():
         f"color:{TEXT3};margin-bottom:0.4rem;'>GATE FILTER COUNTS</div>",
         unsafe_allow_html=True,
     )
-    _MIN_EDGE_CENTS = 2.0   # gate: arbs below this are blocked
-    _MAX_EDGE_CENTS = 50.0  # gate: arbs above this are flagged / capped
-    _ghost_blocked = None
-    _below_min_edge = None
-    _above_max_edge = None
-
-    # Try PostgreSQL arbs table first
-    try:
-        from database.repository import get_engine as _ge_gate
-        from sqlalchemy import text as _txt_gate
-        _eng_gate = _ge_gate()
-        with _eng_gate.connect() as _conn_gate:
-            _ghost_row = _conn_gate.execute(_txt_gate(
-                "SELECT COUNT(*) FROM arbs WHERE net_edge_cents <= 0"
-            )).fetchone()
-            _below_row = _conn_gate.execute(_txt_gate(
-                "SELECT COUNT(*) FROM arbs WHERE net_edge_cents > 0 AND net_edge_cents < :min_e",
-            ), {"min_e": _MIN_EDGE_CENTS}).fetchone()
-            _above_row = _conn_gate.execute(_txt_gate(
-                "SELECT COUNT(*) FROM arbs WHERE net_edge_cents > :max_e",
-            ), {"max_e": _MAX_EDGE_CENTS}).fetchone()
-        _ghost_blocked  = int(_ghost_row[0]) if _ghost_row else 0
-        _below_min_edge = int(_below_row[0]) if _below_row else 0
-        _above_max_edge = int(_above_row[0]) if _above_row else 0
-    except Exception:
-        pass
-
-    # Fallback to SQLite arbitrage_opportunities table
-    if _ghost_blocked is None:
-        try:
-            from dashboard.data_layer import _sqlite_conn as _gsc_gate
-            _gate_conn = _gsc_gate()
-            if _gate_conn:
-                try:
-                    _g_row = _gate_conn.execute(
-                        "SELECT COUNT(*) FROM arbitrage_opportunities WHERE CAST(net_edge_cents AS REAL) <= 0"
-                    ).fetchone()
-                    _b_row = _gate_conn.execute(
-                        "SELECT COUNT(*) FROM arbitrage_opportunities "
-                        "WHERE CAST(net_edge_cents AS REAL) > 0 AND CAST(net_edge_cents AS REAL) < ?",
-                        (_MIN_EDGE_CENTS,),
-                    ).fetchone()
-                    _a_row = _gate_conn.execute(
-                        "SELECT COUNT(*) FROM arbitrage_opportunities "
-                        "WHERE CAST(net_edge_cents AS REAL) > ?",
-                        (_MAX_EDGE_CENTS,),
-                    ).fetchone()
-                    _ghost_blocked  = int(_g_row[0]) if _g_row else 0
-                    _below_min_edge = int(_b_row[0]) if _b_row else 0
-                    _above_max_edge = int(_a_row[0]) if _a_row else 0
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        _gate_conn.close()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    _MIN_EDGE_CENTS = 2.0
+    _MAX_EDGE_CENTS = 50.0
+    _ghost_blocked  = _asts.get("ghost_blocked")  if _asts else None
+    _below_min_edge = _asts.get("below_min_edge") if _asts else None
+    _above_max_edge = _asts.get("above_max_edge") if _asts else None
 
     if _ghost_blocked is not None:
         _gc1, _gc2, _gc3 = st.columns(3)
         _gc1.metric(
             "Ghost Arbs Blocked",
             f"{_ghost_blocked:,}",
-            help="Arbs with net_edge_cents ≤ 0 (fees wiped the gross edge — ghost arb gate)",
+            help="Records with net_edge_cents ≤ 0 (fees wiped the gross edge — ghost arb gate; all strategies incl. YNC)",
         )
         _gc2.metric(
             f"Below Min Edge (<{_MIN_EDGE_CENTS:.0f}¢)",
             f"{_below_min_edge:,}",
-            help=f"Arbs with positive but sub-threshold edge (< {_MIN_EDGE_CENTS:.0f}¢) — excluded by min edge filter",
+            help=f"Records with positive but sub-threshold edge (< {_MIN_EDGE_CENTS:.0f}¢) — excluded by min edge filter (all strategies incl. YNC feed artifacts)",
         )
         _gc3.metric(
             f"Above Max Edge Cap (>{_MAX_EDGE_CENTS:.0f}¢)",
             f"{_above_max_edge:,}",
-            help=f"Arbs with net_edge_cents > {_MAX_EDGE_CENTS:.0f}¢ — flagged as data artifacts (pre-settlement / stale book)",
+            help=f"Records with net_edge_cents > {_MAX_EDGE_CENTS:.0f}¢ — flagged as data artifacts (pre-settlement / stale book; all strategies incl. YNC)",
         )
         if _above_max_edge and _above_max_edge > 0:
-            st.info(f"{_above_max_edge:,} arbs exceed the {_MAX_EDGE_CENTS:.0f}¢ sanity cap — these are likely pre-settlement artifacts and should not be traded.")
+            st.info(f"{_above_max_edge:,} records exceed the {_MAX_EDGE_CENTS:.0f}¢ sanity cap — these are likely pre-settlement or stale-book artifacts and should not be traded.")
     else:
         st.caption("Gate filter counts unavailable — database not connected.")
 
@@ -1950,44 +1885,15 @@ def _render_data_coverage():
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.4rem;'>ARB DROUGHT ANALYSIS (LAST 24H)</div>",
+        f"color:{TEXT3};margin-bottom:0.4rem;'>ME/TH ARB DROUGHT ANALYSIS (LAST 24H — YNC excluded)</div>",
         unsafe_allow_html=True,
     )
     _drought_minutes = None
     try:
         import pandas as _pd_drought
-        from datetime import datetime as _dt_drought, timezone as _tz_drought, timedelta as _td_drought
+        from datetime import datetime as _dt_drought, timezone as _tz_drought
         _now_drought = _dt_drought.now(_tz_drought.utc)
-        _cutoff_drought = (_now_drought - _td_drought(hours=24)).isoformat()
-
-        # Try PostgreSQL arbs table
-        _drought_ts_list = []
-        try:
-            from database.repository import get_engine as _ge_drought
-            from sqlalchemy import text as _txt_drought
-            _eng_drought = _ge_drought()
-            with _eng_drought.connect() as _conn_drought:
-                _d_rows = _conn_drought.execute(_txt_drought(
-                    "SELECT ts FROM arbs WHERE ts >= :cutoff ORDER BY ts",
-                ), {"cutoff": _cutoff_drought}).fetchall()
-                _drought_ts_list = [r[0] for r in _d_rows if r[0] is not None]
-        except Exception:
-            pass
-
-        # Fallback to SQLite
-        if not _drought_ts_list:
-            try:
-                from dashboard.data_layer import _sqlite_conn as _gsc_drought
-                _dc = _gsc_drought()
-                if _dc:
-                    _dr_rows = _dc.execute(
-                        "SELECT detected_at FROM arbitrage_opportunities WHERE detected_at >= ? ORDER BY detected_at",
-                        (_cutoff_drought,),
-                    ).fetchall()
-                    _dc.close()
-                    _drought_ts_list = [r[0] for r in _dr_rows if r[0] is not None]
-            except Exception:
-                pass
+        _drought_ts_list = get_arb_drought_timestamps(hours=24)
 
         if _drought_ts_list:
             _drought_ts = _pd_drought.to_datetime(_drought_ts_list, utc=True, errors="coerce").dropna()
@@ -2023,22 +1929,22 @@ def _render_data_coverage():
             _drought_label = f"{_drought_minutes}m"
         _dc1, _dc2 = st.columns(2)
         _dc1.metric(
-            "LONGEST ARB DROUGHT (24H)",
+            "LONGEST ME/TH DROUGHT (24H)",
             _drought_label,
-            help="Longest consecutive stretch (minutes) with zero arbs detected in the last 24 hours",
+            help="Longest consecutive stretch (minutes) with zero ME/TH arbs in the last 24 hours (YNC feed artifacts excluded)",
         )
         _drought_pct = _drought_minutes / (24 * 60) * 100
         _dc2.metric(
             "DROUGHT % OF DAY",
             f"{_drought_pct:.1f}%",
-            help="Fraction of the last 24h with zero arb activity",
+            help="Fraction of the last 24h with zero ME/TH arb activity (YNC feed artifacts excluded)",
         )
         if _drought_minutes > 120:
-            st.warning(f"⚠️ Longest arb drought in last 24h: {_drought_label} — scanner may have been offline or market was quiet")
+            st.warning(f"⚠️ Longest ME/TH arb drought in last 24h: {_drought_label} — scanner may have been offline or market was quiet (YNC feed artifacts excluded)")
         else:
-            st.caption(f"Longest no-arb stretch in last 24h: {_drought_label}. Healthy scanners typically see short droughts (< 30m).")
+            st.caption(f"Longest ME/TH no-arb stretch in last 24h: {_drought_label} (YNC feed artifacts excluded). Healthy scanners typically see short droughts (< 30m).")
     else:
-        st.caption("Arb drought metric unavailable — database not connected.")
+        st.caption("ME/TH arb drought metric unavailable — database not connected.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     _l2_days  = int(coverage.get("l2_coverage_days", 0))
@@ -2055,17 +1961,11 @@ def _render_data_coverage():
     _ext_assets = 0
     _ext_last = ""
     try:
-        from dashboard.data_layer import get_latest_external_prices as _glep09
-        _lp = _glep09()
-        _ext_assets = len(_lp)
-        if _ext_assets:
-            from database.repository import get_engine as _ge09
-            from sqlalchemy import text as _t09
-            with _ge09().connect() as _c09:
-                _r09 = _c09.execute(_t09("SELECT COUNT(*), MAX(obs_date) FROM ext_market_daily")).fetchone()
-                if _r09:
-                    _ext_rows = int(_r09[0] or 0)
-                    _ext_last = str(_r09[1] or "")[:10]
+        from dashboard.data_layer import get_ext_market_daily_stats as _geds09
+        _eds = _geds09()
+        _ext_assets = _eds.get("n_assets", 0)
+        _ext_rows   = _eds.get("n_rows", 0)
+        _ext_last   = _eds.get("latest", "")
     except Exception:
         pass
     _ext_note = (

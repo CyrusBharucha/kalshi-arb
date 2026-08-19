@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_kalshi_sign_request.py
 =====================================
 Unit tests for data/kalshi_client.py:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_execution_simulator.py
 ===================================
 Unit tests for execution/simulator.py — ExecutionSimulator, Leg, ExecutionResult.

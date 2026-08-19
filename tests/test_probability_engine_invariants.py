@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_probability_engine_invariants.py
 ============================================
 Invariant tests for cross_asset/probability_engine.py.
