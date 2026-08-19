@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_market_classifier.py
 =================================
 Tests for markets/classifier.py — all pure Python, no DB, no network.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_deadline_ladder_guard.py
 ===================================
 Regression guards for the cumulative-deadline false-positive filter in

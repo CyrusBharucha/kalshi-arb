@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_canadian_loaders.py
 ================================
 Unit tests for analysis/canadian_markets:

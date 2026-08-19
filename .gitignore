@@ -66,13 +66,13 @@ kalshi_historical/
 !data/live_arb_log.jsonl
 
 # ── Runtime / cache files (generated at run-time, not source) ────────────────
-dashboard/live_arbs.db
-dashboard/dashboard.db
-data/synthesis_markets_cache.json
+# data/synthesis_markets_cache.json  -- kept in git as cold-start bootstrap
 data/ws_predict_cache.json
-*.db
 *.db-shm
 *.db-wal
+# Keep seeded arb databases in git (real scan data for dashboard)
+!dashboard/live_arbs.db
+!dashboard/dashboard.db
 
 .streamlit/secrets.toml
 

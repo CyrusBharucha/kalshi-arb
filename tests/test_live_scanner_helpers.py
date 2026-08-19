@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_scanner_helpers.py
 =====================================
 Unit tests for arbitrage/live_scanner helpers:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_synthesis_integration.py
 Phase 10: Tests for Synthesis WebSocket integration.
 

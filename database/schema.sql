@@ -539,3 +539,17 @@ CREATE INDEX IF NOT EXISTS idx_cams_scanned_at ON cross_asset_model_spreads(scan
 CREATE INDEX IF NOT EXISTS idx_cams_model      ON cross_asset_model_spreads(model_name, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cams_flagged    ON cross_asset_model_spreads(is_flagged, scanned_at DESC)
     WHERE is_flagged;
+
+-- Gate 0: series-level CE/ME eligibility classifications
+CREATE TABLE IF NOT EXISTS event_series_classifications (
+    series_prefix   TEXT PRIMARY KEY,
+    market_type     TEXT NOT NULL DEFAULT 'unknown',
+    ce_eligible     BOOLEAN NOT NULL DEFAULT FALSE,
+    me_eligible     BOOLEAN NOT NULL DEFAULT FALSE,
+    status          TEXT NOT NULL DEFAULT 'UNCLASSIFIED',
+    auto_reason     TEXT,
+    suffix_pattern  TEXT,
+    classified_by   TEXT NOT NULL DEFAULT 'auto',
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_esc_prefix ON event_series_classifications(series_prefix);

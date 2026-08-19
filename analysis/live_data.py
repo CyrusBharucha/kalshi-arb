@@ -1,4 +1,4 @@
-﻿"""
+"""
 cross_asset/live_data.py
 =========================
 Live cross-asset data fetcher — no paid API keys required for core functionality.

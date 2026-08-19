@@ -1,4 +1,4 @@
-﻿"""
+"""
 backtest/full_backtest.py
 Full historical backtest of all detected arbitrage opportunities.
 

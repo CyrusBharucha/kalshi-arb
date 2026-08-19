@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_ws_helpers.py
 ==========================
 Unit tests for helper functions in data/websocket_client.py:

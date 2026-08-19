@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_event_study_helpers.py
 ===================================
 Unit tests for pure-logic helper functions in cross_asset/event_study.py:
@@ -11,11 +11,14 @@ No database, no network.
 from __future__ import annotations
 
 import math
+import warnings
 import pandas as pd
 import numpy as np
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
+
+pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
 
 # ---------------------------------------------------------------------------

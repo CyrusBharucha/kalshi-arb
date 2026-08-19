@@ -32,6 +32,20 @@ try:
     # Support a single DATABASE_URL (Neon / Supabase / Railway style)
     if "DATABASE_URL" in _s and not os.environ.get("DATABASE_URL"):
         os.environ["DATABASE_URL"] = str(_s["DATABASE_URL"])
+    # Also check nested sections for DATABASE_URL / NEON_DATABASE_URL
+    if not os.environ.get("DATABASE_URL"):
+        for _sec_val in _s.values():
+            if hasattr(_sec_val, "get"):
+                _durl = _sec_val.get("DATABASE_URL") or _sec_val.get("NEON_DATABASE_URL")
+                if _durl:
+                    os.environ["DATABASE_URL"] = str(_durl)
+                    break
+    # Similarly check nested sections for per-key values we may have missed
+    if not os.environ.get("SYNTHESIS_SECRET_KEY"):
+        for _sec_val in _s.values():
+            if hasattr(_sec_val, "get") and _sec_val.get("SYNTHESIS_SECRET_KEY"):
+                os.environ["SYNTHESIS_SECRET_KEY"] = str(_sec_val["SYNTHESIS_SECRET_KEY"])
+                break
 except Exception:
     pass  # Not running under Streamlit — env vars already loaded from .env
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_arb_scanner_extended.py
 =========================================
 Extended unit tests for data/synthesis_live.py LiveArbScanner._evaluate()

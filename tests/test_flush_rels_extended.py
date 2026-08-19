@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_flush_rels_extended.py
 ====================================
 Extended unit tests for analysis/relationship_runner._flush_rels().

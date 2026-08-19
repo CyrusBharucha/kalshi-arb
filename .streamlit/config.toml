@@ -1,4 +1,7 @@
-# Last updated: 2026-09-03 — force Streamlit Cloud redeploy
+# Last updated: 2026-09-15 — CE scanner enabled, all ME/TH labels removed
+[client]
+showSidebarNavigation = false
+
 [server]
 headless = true
 enableCORS = false

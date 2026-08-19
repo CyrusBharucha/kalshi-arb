@@ -1,4 +1,4 @@
-﻿"""
+"""
 data/synthesis_live.py
 ======================
 Synthesis API -> Kalshi live orderbook WebSocket client.
@@ -405,12 +405,13 @@ class SynthesisWebSocketClient:
             on_close   = self._on_close,
         )
         # run_forever blocks until connection closes.
-        # ping_interval=0 disables the websocket-library auto-ping: Synthesis's
-        # server does not respond to WebSocket-level PINGs and silently drops them,
-        # causing run_forever to disconnect after ping_timeout seconds on every
-        # cycle.  Our ws_bridge.py zombie watchdog (120s silence → reconnect) is
-        # a higher-level and more reliable liveness check.
-        self._ws.run_forever(ping_interval=0)
+        # ping_interval keeps the TCP connection alive through Streamlit Cloud's
+        # load balancer (which kills idle connections after ~60s).  Even if
+        # Synthesis ignores WebSocket-level PINGs, sending them prevents the
+        # infrastructure from treating the connection as idle.  ping_timeout=0
+        # disables pong-based disconnect so the connection survives even if the
+        # server never responds to pings.
+        self._ws.run_forever(ping_interval=25, ping_timeout=0)
 
     def _on_open(self, ws):
         self._reconnect_delay = RECONNECT_DELAY_BASE  # reset on success
@@ -532,6 +533,34 @@ class SynthesisWebSocketClient:
         book = self._cache.get(market_id)
         if book is not None:
             book.clear_gap()
+
+    def subscribe_tickers(self, new_tickers: List[str]) -> int:
+        """
+        Send subscribe messages for tickers not yet in self._markets.
+        Safe to call while the WS is connected; no-op if not connected.
+        Returns count of newly subscribed tickers.
+        """
+        if self._ws is None:
+            return 0
+        existing = set(self._markets)
+        added = [t for t in new_tickers if t not in existing]
+        if not added:
+            return 0
+        CHUNK = 1000
+        try:
+            for i in range(0, len(added), CHUNK):
+                chunk = added[i:i + CHUNK]
+                self._ws.send(json.dumps({
+                    "type": "subscribe",
+                    "venue": self._venue,
+                    "markets": chunk,
+                }))
+            self._markets.extend(added)
+            logger.info("subscribe_tickers: added %d new tickers (total=%d)", len(added), len(self._markets))
+        except Exception as exc:
+            logger.warning("subscribe_tickers send failed: %s", exc)
+            return 0
+        return len(added)
 
     def _on_error(self, ws, error):
         logger.warning("WebSocket error: %s", error)

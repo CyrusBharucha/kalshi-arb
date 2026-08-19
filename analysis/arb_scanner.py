@@ -1,4 +1,4 @@
-﻿"""
+"""
 cross_asset/arb_scanner.py
 ===========================
 Cross-asset arbitrage scanner.

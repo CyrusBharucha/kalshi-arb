@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_subset_relationships.py
 =====================================
 Unit tests for markets/relationship_detector.detect_subset_relationships().

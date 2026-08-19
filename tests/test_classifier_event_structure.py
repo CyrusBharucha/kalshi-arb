@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_classifier_event_structure.py
 ==========================================
 Unit tests for markets/classifier.detect_event_structure().

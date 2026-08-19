@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_orderbook_ws.py
 ===========================
 Unit tests for the in-memory OrderBook and LivePriceCache classes

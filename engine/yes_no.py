@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/yes_no.py
 Strategy 1: YES/NO Complement Arbitrage
 
@@ -135,6 +135,9 @@ def scan_historical_complement_arb(
             yes_ask = float(yes_ask)
             yes_bid = float(yes_bid)
         except (TypeError, ValueError):
+            continue
+        import math
+        if math.isnan(yes_ask) or math.isnan(yes_bid):
             continue
 
         if yes_bid <= 0 or yes_ask <= 0 or yes_ask >= 1.0:

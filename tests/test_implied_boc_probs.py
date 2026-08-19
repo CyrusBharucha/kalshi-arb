@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_implied_boc_probs.py
 =================================
 Tests for data/external_market_data.py::compute_implied_boc_probabilities.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 cross_asset/spreads_pipeline.py
 ================================
 Computes cross-asset spreads by joining:
@@ -168,23 +168,24 @@ def run_pipeline(days_back: int = 30) -> Dict[str, int]:
             r_ct = conn.execute(text("SELECT COUNT(*) FROM market_snapshots")).fetchone()
             if r_ct and r_ct[0] > 0:
                 snapshot_df = pd.read_sql(text("""
-                    SELECT DISTINCT ON (m.ticker)
+                    WITH latest_snaps AS (
+                        SELECT DISTINCT ON (market_id)
+                            market_id, yes_bid, yes_ask, snapshot_ts
+                        FROM market_snapshots
+                        WHERE snapshot_ts >= NOW() - INTERVAL '24 hours'
+                        ORDER BY market_id, snapshot_ts DESC
+                    )
+                    SELECT
                         m.ticker, m.title, m.market_id, m.close_time,
                         s.yes_bid, s.yes_ask, s.snapshot_ts
                     FROM markets m
-                    JOIN LATERAL (
-                        SELECT yes_bid, yes_ask, snapshot_ts
-                        FROM market_snapshots
-                        WHERE market_id = m.market_id
-                          AND snapshot_ts >= NOW() - INTERVAL '24 hours'
-                        ORDER BY snapshot_ts DESC LIMIT 1
-                    ) s ON TRUE
+                    JOIN latest_snaps s ON s.market_id = m.market_id
                     WHERE m.status IN ('open','active')
                       AND (
                           m.ticker LIKE 'KXBOC%' OR m.ticker LIKE 'KXCB%'
                           OR m.ticker LIKE 'KXCAD%' OR m.ticker LIKE 'KXCORR%'
                       )
-                    ORDER BY m.ticker, s.snapshot_ts DESC
+                    ORDER BY m.ticker
                     LIMIT 500
                 """), conn)
             if snapshot_df.empty:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_config.py
 =====================
 Sanity-check tests for config.py constants and the SequenceGapMonitor

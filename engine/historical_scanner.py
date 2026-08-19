@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/historical_scanner.py
 ================================
 Scans the `l2_snapshots` table for historical arbitrage opportunities,

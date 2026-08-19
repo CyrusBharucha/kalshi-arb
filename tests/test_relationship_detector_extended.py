@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_relationship_detector_extended.py
 =============================================
 Extended unit tests for markets/relationship_detector.py.

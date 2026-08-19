@@ -1,4 +1,4 @@
-﻿"""
+"""
 data/l2_snapshot_writer.py
 ==========================
 Periodically writes L2 book snapshots to PostgreSQL (l2_snapshots table).

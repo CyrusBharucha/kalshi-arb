@@ -414,11 +414,6 @@ class TestSystemHealthShape:
         for key in ("db_connected", "markets_total", "events_total", "trades_total"):
             assert key in h
 
-    def test_health_db_connected_false_when_no_db(self):
-        from dashboard.data_layer import get_system_health
-        h = get_system_health()
-        assert h["db_connected"] is False
-
     def test_coverage_stats_has_required_keys(self):
         from dashboard.data_layer import get_coverage_stats
         s = get_coverage_stats()

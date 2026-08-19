@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_me_strategy_extended.py
 =====================================
 Extended unit tests for arbitrage/mutually_exclusive.py covering:

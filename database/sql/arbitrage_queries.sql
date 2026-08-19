@@ -218,7 +218,7 @@ WITH proximity AS (
         ao.detected_at,
         EXTRACT(EPOCH FROM (m.close_time::TIMESTAMPTZ - ao.detected_at)) / 3600.0 AS hours_to_close
     FROM arbitrage_opportunities ao
-    CROSS JOIN LATERAL UNNEST(ao.markets_involved::TEXT[]) AS mid(market_id)
+    CROSS JOIN UNNEST(ao.markets_involved::TEXT[]) AS mid(market_id)
     JOIN markets m ON m.market_id = mid.market_id
     WHERE m.close_time IS NOT NULL
       AND ao.detected_at IS NOT NULL
@@ -308,7 +308,7 @@ WITH event_value AS (
         MAX(ao.detected_at)                                  AS last_arb_at,
         COUNT(DISTINCT ao.strategy_type)                     AS distinct_strategies
     FROM arbitrage_opportunities ao
-    CROSS JOIN LATERAL UNNEST(ao.markets_involved::TEXT[]) AS mid(market_id)
+    CROSS JOIN UNNEST(ao.markets_involved::TEXT[]) AS mid(market_id)
     JOIN markets m   ON m.market_id     = mid.market_id
     JOIN events  e   ON e.event_ticker  = m.event_ticker
     GROUP BY e.event_ticker, e.title

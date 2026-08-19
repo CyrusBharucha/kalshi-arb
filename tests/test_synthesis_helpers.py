@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_synthesis_helpers.py
 ================================
 Unit tests for pure-logic helpers in data/synthesis_live.py:

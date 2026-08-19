@@ -1,4 +1,4 @@
-﻿"""
+"""
 cross_asset/live_feed.py
 =========================
 Background daemon that polls live cross-asset data every 5 minutes and writes

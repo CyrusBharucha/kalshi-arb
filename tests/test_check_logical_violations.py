@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_check_logical_violations.py
 ========================================
 Unit tests for markets/relationship_detector.check_logical_price_violations().

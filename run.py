@@ -1,4 +1,4 @@
-﻿"""
+"""
 run.py
 Main entry point for the Kalshi Arbitrage Engine.
 

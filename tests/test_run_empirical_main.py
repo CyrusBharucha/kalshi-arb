@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_run_empirical_main.py
 ==================================
 Unit tests for analysis/run_empirical.run_empirical() orchestration function.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_yes_no_strategy.py
 ==============================
 Unit tests for arbitrage/yes_no.py — check_complement_arb, scan_complement_arb,

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_l2_orderbook.py
 ==========================
 Unit tests for the L2 order book reconstruction engine.

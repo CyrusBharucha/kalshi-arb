@@ -88,6 +88,8 @@ _pg_engine      = None
 _pg_ok          = False          # True once first successful write confirmed
 _pg_lock        = threading.Lock()
 _pg_init_tried  = False
+_pg_last_fail_ts: float = 0.0   # timestamp of last failed connect attempt
+_PG_RETRY_BACKOFF = 30.0        # seconds to wait between failed connection retries
 
 
 # DDL executed on first connect so no manual migration needed
@@ -118,22 +120,39 @@ CREATE INDEX IF NOT EXISTS idx_livecloud_ticker   ON live_arbs_cloud(ticker);
 
 def _get_pg_engine():
     """Return a SQLAlchemy engine for Postgres, or None if not configured."""
-    global _pg_engine, _pg_ok, _pg_init_tried
+    global _pg_engine, _pg_ok, _pg_init_tried, _pg_last_fail_ts
     if _pg_init_tried:
         return _pg_engine
+    # Back off 30s after a failed attempt to avoid hammering Neon during cold-start
+    if _pg_last_fail_ts and (time.time() - _pg_last_fail_ts) < _PG_RETRY_BACKOFF:
+        return None
 
     with _pg_lock:
         if _pg_init_tried:
             return _pg_engine
+        if _pg_last_fail_ts and (time.time() - _pg_last_fail_ts) < _PG_RETRY_BACKOFF:
+            return None
 
         # Support DATABASE_URL or individual DB_* vars (same as config.py)
         # Also try st.secrets directly — in case the env bridge in app.py
         # hasn't run yet (e.g. background scanner thread starts first).
         db_url = os.environ.get("DATABASE_URL", "").strip()
         if not db_url:
+            # 3-layer detection: top-level → nested section → iterate all values
             try:
                 import streamlit as st
                 db_url = (st.secrets.get("DATABASE_URL") or "").strip()
+                if not db_url:
+                    # Try nested sections (e.g. [database] DATABASE_URL = "...")
+                    for _sec in st.secrets.values():
+                        if hasattr(_sec, "get"):
+                            _v = (_sec.get("DATABASE_URL") or "").strip()
+                            if _v:
+                                db_url = _v
+                                break
+                if not db_url:
+                    # Also check NEON_DATABASE_URL alias
+                    db_url = (st.secrets.get("NEON_DATABASE_URL") or "").strip()
             except Exception:
                 pass
         if not db_url:
@@ -162,7 +181,14 @@ def _get_pg_engine():
                 pool_size=2,
                 max_overflow=3,
                 pool_pre_ping=True,
-                connect_args={"connect_timeout": 5},
+                pool_recycle=240,   # recycle before Neon's 5-min idle timeout
+                connect_args={
+                    "connect_timeout": 5,
+                    "keepalives": 1,
+                    "keepalives_idle": 60,
+                    "keepalives_interval": 10,
+                    "keepalives_count": 5,
+                },
             )
             # Test connection + auto-create table
             with engine.begin() as conn:
@@ -172,11 +198,20 @@ def _get_pg_engine():
             _pg_init_tried = True  # only lock in after success so transient failures can retry
             logger.info("live_arb_store: PostgreSQL connected — arbs will be dual-written")
         except Exception as exc:
-            logger.warning("live_arb_store: PostgreSQL unavailable (%s) — will retry next call", exc)
+            logger.warning("live_arb_store: PostgreSQL unavailable (%s) — will retry in %ds", exc, int(_PG_RETRY_BACKOFF))
             _pg_engine = None
-            # leave _pg_init_tried = False so next call retries (handles Neon cold-start)
+            _pg_last_fail_ts = time.time()
+            # leave _pg_init_tried = False so next call retries after backoff
 
         return _pg_engine
+
+
+def get_pg_engine_cached():
+    """Return the already-initialized Postgres engine without triggering a new connection.
+    Falls back to _get_pg_engine() if not yet initialized.  Prefer this over _get_pg_engine()
+    in page modules — avoids the 30-second backoff on first render when app.py already
+    connected successfully."""
+    return _pg_engine or _get_pg_engine()
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +231,8 @@ _SPORTS_FILTER_SQ = _SPORTS_FILTER_PG  # SQLite LIKE syntax is identical
 # Strategy allowlist
 # ---------------------------------------------------------------------------
 _PERSISTABLE_STRATEGIES = {
-    "yes_no_complement",
+    # Only executable strategies. YNC (yes_no_complement) is excluded — YES+NO always
+    # sum >= 100¢ on Kalshi by exchange design; sub-100¢ quotes are feed/rounding artifacts.
     "collectively_exhaustive",
     "mutually_exclusive",
     "threshold_order",
@@ -211,18 +247,18 @@ def persist(opp: Dict[str, Any]) -> None:
     """
     Write a live-detected arb to SQLite (always) and PostgreSQL (when available).
     Safe to call from any thread. Never raises — errors are logged at DEBUG level.
-    Persists all five strategy types: yes_no_complement, collectively_exhaustive,
-    mutually_exclusive, threshold_order, and superset.
+    Active scanners: collectively_exhaustive, mutually_exclusive, threshold_order.
+    YNC is not executable on Kalshi by exchange design (YES+NO ≥ $1.00 always).
     """
     strategy = opp.get("strategy", "yes_no_complement")
     if strategy not in _PERSISTABLE_STRATEGIES:
         return
 
-    # Guard: never persist ghost arbs (empty ticker or zero/negative edge)
+    # Guard: never persist ghost arbs (empty ticker or zero/negative gross edge)
     _ticker_chk = str(opp.get("ticker", "") or "").strip()
-    _net_chk = float(opp.get("net_edge_cents", 0) or 0)
-    if not _ticker_chk or _net_chk <= 0:
-        logger.debug("live_arb_store.persist skipping ghost arb: ticker=%r net=%s", _ticker_chk, _net_chk)
+    _gross_chk = float(opp.get("gross_edge_cents", 0) or 0)
+    if not _ticker_chk or _gross_chk <= 0:
+        logger.debug("live_arb_store.persist skipping ghost arb: ticker=%r gross=%s", _ticker_chk, _gross_chk)
         return
 
     ts = time.strftime(
@@ -314,15 +350,14 @@ def query(
     min_net_edge_cents: float = 0.0,
 ) -> List[Dict]:
     """Return live arb records as a list of dicts (newest first)."""
-    engine = _get_pg_engine()
+    engine = get_pg_engine_cached()  # use cached engine to avoid 30s backoff
     if engine is not None:
         return _query_pg(engine, days_back, strategy, min_net_edge_cents)
     return _query_sqlite(days_back, strategy, min_net_edge_cents)
 
 
-_MIN_NET_FLOOR = 2.0   # Hard floor matching the scanner's _MIN_NET_CENTS gate (2¢).
-                       # Prevents pre-fix ghost arbs (wrong fee formula era) from surfacing
-                       # even if they exist in the DB with positive but incorrect net edges.
+_MIN_NET_FLOOR = -15.0  # Allow gross-edge detections (class B) to surface.
+                        # Class A = net positive, Class B = gross positive / net negative (fee-absorbed).
 
 
 def _query_pg(engine, days_back, strategy, min_net_edge_cents) -> List[Dict]:
@@ -332,7 +367,6 @@ def _query_pg(engine, days_back, strategy, min_net_edge_cents) -> List[Dict]:
             "%Y-%m-%dT%H:%M:%SZ",
             time.gmtime(time.time() - days_back * 86400),
         )
-        # Enforce a hard floor matching the scanner gate so stale/pre-fix rows never surface.
         effective_min = max(float(min_net_edge_cents), _MIN_NET_FLOOR)
         # DISTINCT ON (ticker) keeps only the best detection per unique ticker string,
         # suppressing re-detections that occur every 5 min as Gate 5 TTL resets.
@@ -347,10 +381,9 @@ def _query_pg(engine, days_back, strategy, min_net_edge_cents) -> List[Dict]:
             FROM live_arbs_cloud
             WHERE detected_at >= CAST(:cutoff AS TIMESTAMPTZ)
               AND net_edge_cents >= :min_net
-              AND gross_edge_cents < 50
               AND gross_edge_cents > 0
               AND ticker != ''
-              AND strategy_type != 'collectively_exhaustive'
+              AND strategy_type NOT IN ('yes_no_complement')
               AND {_SPORTS_FILTER_PG}
         """
         params: dict = {"cutoff": cutoff, "min_net": effective_min}
@@ -391,15 +424,13 @@ def _query_sqlite(days_back, strategy, min_net_edge_cents) -> List[Dict]:
             time.gmtime(time.time() - days_back * 86400),
         )
         effective_min = max(float(min_net_edge_cents), _MIN_NET_FLOOR)
-        # Deduplicate by ticker — keep only the most recent row per unique event.
-        # SQLite lacks DISTINCT ON, so use a subquery to get the max id per ticker.
         sql = (
             "SELECT id, detected_at, strategy_type, ticker, legs, yes_ask, no_ask, "
             "gross_edge_cents, fees_cents, net_edge_cents, executable_contracts, "
             "classification, confidence FROM live_arbs "
             f"WHERE detected_at >= ? AND net_edge_cents >= ? "
-            f"AND gross_edge_cents < 50 AND gross_edge_cents > 0 AND ticker != '' "
-            f"AND strategy_type != 'collectively_exhaustive' "
+            f"AND gross_edge_cents > 0 AND ticker != '' "
+            f"AND strategy_type NOT IN ('yes_no_complement') "
             f"AND {_SPORTS_FILTER_SQ} "
             "AND id IN (SELECT MAX(id) FROM live_arbs GROUP BY ticker)"
         )
@@ -441,16 +472,15 @@ def count_today() -> int:
         try:
             from sqlalchemy import text
             with engine.connect() as conn:
-                conn.execute(text("SET statement_timeout = '5000'"))
                 row = conn.execute(
                     text(
                         f"SELECT COUNT(*) FROM live_arbs_cloud "
                         f"WHERE detected_at >= :d "
-                        f"AND net_edge_cents >= :min_net "
-                        f"AND gross_edge_cents < 50 AND gross_edge_cents > 0 "
-                        f"AND ticker != '' AND {_SPORTS_FILTER_PG}"
+                        f"AND gross_edge_cents > 0 "
+                        f"AND ticker != '' AND strategy_type NOT IN ('yes_no_complement') "
+                        f"AND {_SPORTS_FILTER_PG}"
                     ),
-                    {"d": f"{today}T00:00:00Z", "min_net": _MIN_NET_FLOOR},
+                    {"d": f"{today}T00:00:00Z"},
                 ).fetchone()
             return int(row[0]) if row else 0
         except Exception:
@@ -461,11 +491,60 @@ def count_today() -> int:
         with _sqlite_lock:
             row = conn.execute(
                 f"SELECT COUNT(*) FROM live_arbs WHERE detected_at >= ? "
-                f"AND net_edge_cents >= ? "
-                f"AND gross_edge_cents < 50 AND gross_edge_cents > 0 "
-                f"AND ticker != '' AND {_SPORTS_FILTER_SQ}",
-                (f"{today}T00:00:00Z", _MIN_NET_FLOOR),
+                f"AND gross_edge_cents > 0 "
+                f"AND ticker != '' AND strategy_type NOT IN ('yes_no_complement') "
+                f"AND {_SPORTS_FILTER_SQ}",
+                (f"{today}T00:00:00Z",),
             ).fetchone()
         return int(row[0]) if row else 0
     except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# prune_sqlite() — keep only the last N days of rows in the local SQLite DB.
+# Called periodically from the arb-scanner eviction loop so the file never
+# grows unbounded on long-running Streamlit Cloud deployments.
+# ---------------------------------------------------------------------------
+_SQLITE_KEEP_DAYS = 7   # retain 7 days of arb history locally
+
+
+_last_vacuum_ts: float = 0.0
+_VACUUM_INTERVAL_S = 86400  # VACUUM at most once per day — it rewrites the whole file
+
+
+def prune_sqlite(keep_days: int = _SQLITE_KEEP_DAYS) -> int:
+    """
+    Delete rows older than `keep_days` from the SQLite live_arbs table.
+    VACUUM runs at most once per day to avoid blocking the UI thread.
+    Returns the number of rows deleted.  Safe to call from any thread.
+    """
+    global _last_vacuum_ts
+    cutoff = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(time.time() - keep_days * 86400),
+    )
+    try:
+        conn = _get_sqlite()
+        with _sqlite_lock:
+            cur = conn.execute(
+                "DELETE FROM live_arbs WHERE detected_at < ?", (cutoff,)
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            if deleted:
+                logger.info(
+                    "live_arb_store.prune_sqlite: deleted %d rows older than %s",
+                    deleted, cutoff,
+                )
+            # VACUUM rewrites the entire SQLite file — expensive, run at most daily
+            _now = time.time()
+            if deleted and _now - _last_vacuum_ts > _VACUUM_INTERVAL_S:
+                conn.execute("VACUUM")
+                conn.commit()
+                _last_vacuum_ts = _now
+                logger.info("live_arb_store.prune_sqlite: VACUUM complete")
+        return deleted
+    except Exception as exc:
+        logger.warning("live_arb_store.prune_sqlite failed: %s", exc)
         return 0

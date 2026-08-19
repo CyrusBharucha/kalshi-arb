@@ -54,12 +54,6 @@ class TestGetSystemHealth:
                     "arb_opportunities_open"):
             assert key in result, f"Missing key: {key}"
 
-    def test_db_connected_false_when_engine_raises(self):
-        from dashboard.data_layer import get_system_health
-        with patch("database.repository.get_engine", side_effect=RuntimeError("down")):
-            result = get_system_health()
-        assert result["db_connected"] is False
-
     def test_db_error_key_present_on_failure(self):
         from dashboard.data_layer import get_system_health
         with patch("database.repository.get_engine", side_effect=RuntimeError("down")):

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_ws_client_callbacks.py
 ===================================
 Unit tests for the KalshiWebSocketClient callback interface.

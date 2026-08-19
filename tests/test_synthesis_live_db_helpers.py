@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_synthesis_live_db_helpers.py
 =========================================
 Unit tests for data/synthesis_live.py DB helper functions:

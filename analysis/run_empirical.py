@@ -1,4 +1,4 @@
-﻿"""
+"""
 analysis/run_empirical.py
 Targeted empirical research run.
 

@@ -187,6 +187,48 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bt_opportunity
 
 
 -- ---------------------------------------------------------------------------
+-- arbs  (arb store — persisted detections with ts, strategy_type, net/gross edge)
+-- ---------------------------------------------------------------------------
+
+-- Time-range queries (get_arb_store_stats, get_arb_drought_timestamps, get_arb_store_recent)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_arbs_ts
+    ON arbs (ts DESC);
+
+-- Strategy + time compound (drought analysis excludes YNC)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_arbs_strategy_ts
+    ON arbs (strategy_type, ts DESC);
+
+-- Edge filter (get_arb_store_stats fee/DQA sections)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_arbs_net_edge
+    ON arbs (net_edge_cents)
+    WHERE net_edge_cents > 0;
+
+
+-- ---------------------------------------------------------------------------
+-- live_arbs_cloud  (extra compound indices beyond the per-column ones)
+-- ---------------------------------------------------------------------------
+
+-- DISTINCT ON (ticker) ... WHERE detected_at >= cutoff AND net_edge_cents >= min
+-- This composite lets Neon skip rows by date+strategy before deduplicating by ticker.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_livecloud_date_ticker_edge
+    ON live_arbs_cloud (detected_at DESC, ticker, net_edge_cents DESC);
+
+-- _query_pg uses DISTINCT ON (ticker) ORDER BY ticker, net_edge_cents DESC.
+-- PostgreSQL requires the ORDER BY to start with the DISTINCT ON key (ticker),
+-- so the above date-first index cannot be used for deduplication.
+-- This ticker-first index covers the DISTINCT ON sort and the net_edge filter.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_livecloud_ticker_edge
+    ON live_arbs_cloud (ticker, net_edge_cents DESC)
+    WHERE net_edge_cents > 0
+      AND gross_edge_cents > 0
+      AND gross_edge_cents < 50;
+
+-- Date-only index for the WHERE detected_at >= cutoff range filter.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_livecloud_detected_at
+    ON live_arbs_cloud (detected_at DESC);
+
+
+-- ---------------------------------------------------------------------------
 -- Verification query — confirm all indexes exist
 -- ---------------------------------------------------------------------------
 -- Run this after applying indexes to verify:

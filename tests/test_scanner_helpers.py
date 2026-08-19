@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_scanner_helpers.py
 ==============================
 Tests for pure helper functions in arbitrage/scanner.py:

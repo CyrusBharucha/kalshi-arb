@@ -25,25 +25,96 @@ STRATEGY BACKTEST
 """, unsafe_allow_html=True)
     st.markdown("<hr style='margin:0.5rem 0 0.75rem 0;'>", unsafe_allow_html=True)
 
-    st.caption(
-        "SIMULATION ONLY — hypothetical P&L from historical snapshots. "
-        "No real trades. Past simulated performance does not guarantee future results."
-    )
+    st.caption("SIMULATION ONLY — hypothetical P&L from historical snapshots · no real trades")
 
     # --- SQLite mode guard -----
     from dashboard.data_layer import get_system_health as _gh_bt
     _h_bt = _gh_bt()
     _is_sqlite_bt = not _h_bt.get("db_connected", False) and _h_bt.get("db_mode") == "sqlite"
+    # Suppress SQLite banner if sidebar already confirmed Neon is reachable
+    if _is_sqlite_bt and bool(st.session_state.get("_sidebar_neon_ok", False)):
+        _is_sqlite_bt = False
     if _is_sqlite_bt:
-        from dashboard.styles import AMBER as _A_BT, PANEL as _P_BT, BORDER as _B_BT, TEXT2 as _T2_BT
-        st.markdown(
-            f"<div style='background:{_P_BT};border:1px solid {_A_BT};border-left:4px solid {_A_BT};"
-            f"padding:0.75rem 1rem;border-radius:3px;margin-bottom:1rem;font-size:0.72rem;"
-            f"color:{_T2_BT};font-family:JetBrains Mono,monospace;line-height:1.6;'>"
-            f"▶ RUN BACKTEST requires a direct PostgreSQL connection. "
-            f"Launch the backtest runner from the Kalshi Arb desktop application.</div>",
-            unsafe_allow_html=True,
-        )
+        from dashboard.styles import AMBER as _A_BT, PANEL as _P_BT, BORDER as _B_BT, TEXT2 as _T2_BT, GREEN as _G_BT
+        # Check if Neon has arb history we can surface
+        _bt_neon_count = 0
+        try:
+            import dashboard.live_arb_store as _las_bt
+            from sqlalchemy import text as _bt_text
+            _bt_eng = getattr(_las_bt, "_pg_engine", None) or _las_bt.get_pg_engine_cached()
+            if _bt_eng is not None:
+                with _bt_eng.connect() as _bt_c:
+                    _bt_row = _bt_c.execute(_bt_text(
+                        "SELECT COUNT(*) FROM live_arbs_cloud WHERE strategy_type NOT IN ('yes_no_complement')"
+                    )).fetchone()
+                _bt_neon_count = int(_bt_row[0]) if _bt_row else 0
+        except Exception:
+            pass
+        _neon_note = f" · {_bt_neon_count} arbs in Neon cloud" if _bt_neon_count > 0 else ""
+        st.caption(f"RUN BACKTEST requires direct PostgreSQL connection · launch from desktop app{_neon_note}")
+        # Neon edge distribution summary (shown instead of backtest results when no local DB)
+        if _bt_neon_count > 0:
+            try:
+                from sqlalchemy import text as _bt_sql
+                with _bt_eng.connect() as _bt_ec:
+                    _bt_strat_rows = _bt_ec.execute(_bt_sql(
+                        "SELECT strategy_type, COUNT(*) AS n, "
+                        "AVG(net_edge_cents) AS avg_edge, MAX(net_edge_cents) AS best_edge, "
+                        "MIN(net_edge_cents) AS min_edge "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "GROUP BY strategy_type ORDER BY n DESC"
+                    )).fetchall()
+                    _bt_30d = _bt_ec.execute(_bt_sql(
+                        "SELECT DATE(detected_at AT TIME ZONE 'UTC')::text AS d, COUNT(*) AS n "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "AND detected_at >= NOW() - INTERVAL '30 days' "
+                        "GROUP BY 1 ORDER BY 1"
+                    )).fetchall()
+                if _bt_strat_rows:
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                        f"color:#22C55E;font-family:Inter,sans-serif;margin:0.75rem 0 0.35rem;'>"
+                        f"● NEON CLOUD — ARB EDGE SUMMARY (CE/ME/TH)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _bt_cols = st.columns(len(_bt_strat_rows))
+                    for _bi, _br in enumerate(_bt_strat_rows):
+                        _bn, _bavg, _bbest = int(_br[1]), float(_br[2] or 0), float(_br[3] or 0)
+                        _bt_strat_names = {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}
+                        with _bt_cols[_bi]:
+                            st.metric(
+                                _bt_strat_names.get(str(_br[0]).lower(), str(_br[0]).upper()[:6]),
+                                f"{_bn:,} arbs",
+                                help=f"avg {_bavg:.2f}¢ · best {_bbest:.2f}¢",
+                            )
+                            st.caption(f"AVG {_bavg:.2f}¢ · BEST {_bbest:.2f}¢")
+                if _bt_30d:
+                    import pandas as _pd_bt30
+                    _bt30_df = _pd_bt30.DataFrame(_bt_30d, columns=["date", "count"])
+                    _bt30_fig = go.Figure(go.Bar(
+                        x=_bt30_df["date"], y=_bt30_df["count"],
+                        marker_color="#22C55E", marker_line_width=0,
+                    ))
+                    _bt30_fig.update_layout(**plotly_dark_layout(
+                        height=130,
+                        margin={"l": 30, "r": 10, "t": 10, "b": 30},
+                        xaxis={"tickformat": "%b %d", "tickfont": {"size": 8, "family": "JetBrains Mono"}, "showgrid": False},
+                        yaxis={"tickfont": {"size": 8, "family": "JetBrains Mono"}, "showgrid": False, "zeroline": False},
+                        showlegend=False,
+                    ))
+                    st.markdown(
+                        f"<div style='font-size:0.58rem;letter-spacing:0.08em;text-transform:uppercase;"
+                        f"color:#64748B;font-family:Inter,sans-serif;margin-top:0.5rem;margin-bottom:0.2rem;'>"
+                        f"30-DAY NEON DETECTION RATE</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(_bt30_fig, use_container_width=True)
+            except Exception:
+                pass
 
     # --- Parameters -----
     with st.expander("BACKTEST PARAMETERS", expanded=False):
@@ -62,15 +133,15 @@ STRATEGY BACKTEST
         with pc2:
             strategy_sel = st.selectbox(
                 "STRATEGY",
-                ["yes_no_complement"],
-                help="yes_no_complement — YES+NO must sum to 100¢; deviation = riskless arb",
+                ["collectively_exhaustive", "mutually_exclusive", "threshold_order", "yes_no_complement"],
+                help="Strategy to backtest — CE/ME/TH are executable arbs · YNC not executable on Kalshi",
             )
             init_capital = st.number_input("INITIAL CAPITAL ($)", value=10000, step=1000)
         with pc3:
             pos_size = st.number_input("POSITION SIZE (contracts)", value=10, step=1)
             fee_override = st.number_input(
-                "FEE OVERRIDE (cents, 0=auto)", value=0.0, step=0.1, format="%.2f",
-                help="Per-contract fee in cents. 0 = use the fee stored in the database.",
+                "FEE OVERRIDE (¢, 0=auto)", value=0.0, step=0.1, format="%.2f",
+                help="Per-contract fee in ¢ · 0 = use fee from database",
             )
             slippage_bps = st.number_input("SLIPPAGE (bps)", value=5, step=1)
 
@@ -83,11 +154,7 @@ STRATEGY BACKTEST
                 "Requires PostgreSQL + historical data in DB.</small>",
                 unsafe_allow_html=True,
             )
-        st.caption(
-            "⚠ Parameter inputs (date range, capital, position size, fees, slippage) are "
-            "informational — the backtest engine uses its own configured defaults. "
-            "The STRATEGY selector is passed to the engine."
-        )
+        st.caption("Parameter inputs are informational — backtest engine uses configured defaults")
 
         if run_clicked:
             with st.spinner("Running backtest engine…"):
@@ -99,64 +166,29 @@ STRATEGY BACKTEST
                         capture_output=True, text=True, timeout=300,
                     )
                     if result.returncode == 0:
-                        st.success("Backtest complete. Reload to see results.")
+                        st.success("Backtest complete — reload to see results")
                         if result.stdout.strip():
                             st.code(result.stdout[-2000:], language="text")
                     else:
-                        st.error("Backtest failed:")
+                        st.error("BACKTEST FAILED:")
                         st.code((result.stderr or result.stdout)[-2000:], language="text")
                 except subprocess.TimeoutExpired:
-                    st.warning("Backtest timed out after 5 minutes.")
+                    st.warning("BACKTEST TIMED OUT AFTER 5 MINUTES")
                 except FileNotFoundError:
-                    st.error("Python executable not found. Ensure the backtest environment is configured correctly.")
+                    st.error("Python executable not found — backtest environment misconfigured")
 
-    st.caption(
-        "Simulation uses Kalshi historical OHLC candles — open/high/low/close prices per 1-hour bin. "
-        "No bid/ask spread; slippage not modeled."
-    )
+    st.caption("Simulation uses Kalshi OHLC candles (1-hour bins) · no bid/ask spread · slippage not modeled")
 
     # --- Available runs -----
     runs_df, err = get_backtest_runs()
 
     if err and runs_df.empty:
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};
-padding:1.25rem 1.5rem;border-radius:3px;margin-bottom:1rem;'>
-<div style='font-size:0.62rem;letter-spacing:0.1em;color:{BLUE};text-transform:uppercase;margin-bottom:0.5rem;'>
-NO BACKTEST RUNS YET
-</div>
-<div style='font-size:0.72rem;color:{TEXT2};line-height:1.8;'>
-No backtest runs found. Connect a local PostgreSQL database and run the historical scan pipeline to populate backtest results. Use the RUN BACKTEST button above once the database is configured.
-</div>
-<div style='font-size:0.65rem;color:{TEXT3};margin-top:0.75rem;'>
-Data available: historical arb records from the database. Adjust the date range to load them.
-</div>
-</div>""",
-            unsafe_allow_html=True,
-        )
+        st.caption("NO BACKTEST RUNS")
 
         # Show strategy methodology even without data
         from dashboard.styles import AMBER as _AMBER
         st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("#### STRATEGY METHODOLOGY")
-        for strat, desc in [
-            ("mutually_exclusive",      "Sum of NO asks < N−1 across N exclusive outcomes → buy all NOs; N−1 pay out"),
-            ("superset",               "Superset contract must price ≥ subset; violations are arb"),
-            ("threshold_order",        "Ordered thresholds enforce monotonicity; violations create spread arb"),
-            ("collectively_exhaustive", "Sum of YES asks < 100c → buy all outcomes for guaranteed profit"),
-            ("yes_no_complement",      "YES + NO of same contract must sum to 100c; any deviation is riskless two-leg arb"),
-        ]:
-            st.markdown(
-                f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;
-border-radius:3px;margin-bottom:0.5rem;'>
-<div style='font-size:0.62rem;letter-spacing:0.1em;color:{AMBER};
-text-transform:uppercase;margin-bottom:3px;'>
-{strat.replace("_"," ").upper()}
-</div>
-<div style='font-size:0.72rem;color:{TEXT2};font-family:JetBrains Mono,monospace;'>{desc}</div>
-</div>""",
-                unsafe_allow_html=True,
-            )
+        st.caption("YNC: YES+NO sum ≥100¢ structurally · sum <100¢ in DB = feed/rounding artifact · historical scanner data only · not executable")
         # --- Top markets by volume -----
         st.markdown("<hr>", unsafe_allow_html=True)
         _vol_df, _ = get_top_markets_by_volume(limit=20)
@@ -175,7 +207,7 @@ text-transform:uppercase;margin-bottom:3px;'>
             fig_v.update_layout(**plotly_dark_layout(
                 title={"text": "TOP 20 MARKETS BY VOLUME", "font": {"size": 10, "color": TEXT3}},
                 height=500,
-                xaxis_title="Volume (contracts)",
+                xaxis_title="VOLUME (CONTRACTS)",
                 yaxis={"autorange": "reversed"},
                 margin={"l": 10, "r": 60, "t": 30, "b": 30},
             ))
@@ -187,7 +219,7 @@ text-transform:uppercase;margin-bottom:3px;'>
 
     with tab_runs:
         if runs_df.empty:
-            st.info("No backtest runs found in database.")
+            st.caption("NO BACKTEST RUNS IN DATABASE")
         else:
             display_runs = runs_df.copy()
             for col in ["total_pnl", "avg_pnl"]:
@@ -209,7 +241,7 @@ text-transform:uppercase;margin-bottom:3px;'>
     run_id = st.text_input(
         "RUN ID",
         placeholder="e.g. bt_20260101_120000",
-        help="Enter a run_id from the table above",
+        help="ENTER A RUN_ID FROM THE TABLE ABOVE",
     )
 
     if not run_id:
@@ -224,7 +256,7 @@ text-transform:uppercase;margin-bottom:3px;'>
     trades_df, err2 = get_backtest_trades(run_id)
 
     if err2 or trades_df.empty:
-        st.warning(f"No trades found for run '{run_id}'. Check the run ID and ensure the backtest completed successfully.")
+        st.caption(f"NO TRADES FOR RUN '{run_id}'")
         return
 
     # --- Compute metrics -----
@@ -262,8 +294,8 @@ text-transform:uppercase;margin-bottom:3px;'>
     except (TypeError, ValueError):
         _avg_pnl_str = "--"
     _summary_data = {
-        "Metric": ["Total Trades", "Win Rate", "Avg P&L / Trade", "Sharpe Ratio", "Max Drawdown"],
-        "Value": [
+        "METRIC": ["TOTAL TRADES", "WIN RATE", "AVG P&L / TRADE", "SHARPE RATIO", "MAX DRAWDOWN"],
+        "VALUE": [
             str(metrics.get("n_trades", len(trades_df))),
             f"{float(metrics.get('win_rate', 0))*100:.1f}%",
             _avg_pnl_str,
@@ -296,8 +328,8 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig_hist.add_vline(x=0, line_dash="dash", line_color=TEXT3, line_width=0.8)
         fig_hist.update_layout(
             **plotly_dark_layout(
-            title={"text": "TRADE P&L DISTRIBUTION (CENTS)", "font": {"size": 10, "color": TEXT3}},
-            height=200, xaxis_title="P&L per trade (¢)", yaxis_title="Count",
+            title={"text": "TRADE P&L DISTRIBUTION (¢)", "font": {"size": 10, "color": TEXT3}},
+            height=200, xaxis_title="P&L PER TRADE (¢)", yaxis_title="COUNT",
         ))
         st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -330,7 +362,7 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig.add_trace(go.Scatter(
             x=trades_df.get("entry_ts", trades_df.index),
             y=trades_df["cum_pnl"],
-            mode="lines", name="Equity",
+            mode="lines", name="EQUITY",
             line={"color": GREEN, "width": 1.5},
             fill="tozeroy", fillcolor="rgba(34,197,94,0.08)",
         ))
@@ -343,7 +375,7 @@ text-transform:uppercase;margin-bottom:3px;'>
             _dd_y = float(_dd_col.loc[_dd_idx]) + float(trades_df["cum_pnl"].loc[_dd_idx])
             fig.add_annotation(
                 x=_dd_x, y=_dd_y,
-                text="Max DD",
+                text="MAX DD",
                 arrowhead=2,
                 arrowcolor="red",
                 font_color="red",
@@ -354,7 +386,7 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig.update_layout(
             **plotly_dark_layout(
             title={"text": "EQUITY CURVE", "font": {"size": 10, "color": TEXT3}},
-            height=260, xaxis_title="", yaxis_title="Cumulative P&L ($)",
+            height=260, xaxis_title="", yaxis_title="CUMULATIVE P&L ($)",
         ))
         st.plotly_chart(fig, use_container_width=True)
 
@@ -363,21 +395,21 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig2.add_trace(go.Scatter(
             x=trades_df.get("entry_ts", trades_df.index),
             y=trades_df["drawdown"],
-            mode="lines", name="Drawdown",
+            mode="lines", name="DRAWDOWN",
             line={"color": RED, "width": 1.5},
             fill="tozeroy", fillcolor="rgba(239,68,68,0.10)",
         ))
         fig2.update_layout(
             **plotly_dark_layout(
             title={"text": "DRAWDOWN", "font": {"size": 10, "color": TEXT3}},
-            height=260, xaxis_title="", yaxis_title="Drawdown ($)",
+            height=260, xaxis_title="", yaxis_title="DRAWDOWN ($)",
         ))
         st.plotly_chart(fig2, use_container_width=True)
 
     # --- Rolling Sharpe ratio chart (real trade P&L from DB) -----
     _n_real = len(pnl_series)
     if _n_real < 20:
-        st.info(f"Need 20+ logged arbs for rolling Sharpe — {_n_real} logged so far")
+        st.caption(f"NEED 20+ ARBS FOR ROLLING SHARPE — {_n_real} LOGGED SO FAR")
     else:
         _roll_mean = pnl_series.rolling(20).mean()
         _roll_std  = pnl_series.rolling(20).std()
@@ -388,7 +420,7 @@ text-transform:uppercase;margin-bottom:3px;'>
             x=_x_sharpe,
             y=_roll_sharpe.values,
             mode="lines",
-            name="Rolling Sharpe",
+            name="ROLLING SHARPE",
             line={"color": AMBER, "width": 1.5},
         ))
         fig_rs.add_hline(
@@ -412,7 +444,7 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig_rs.update_layout(
             **plotly_dark_layout(
             title={"text": "ROLLING SHARPE (20-TRADE)", "font": {"size": 10, "color": TEXT3}},
-            height=180, xaxis_title="", yaxis_title="Rolling Sharpe (20-trade)",
+            height=180, xaxis_title="", yaxis_title="ROLLING SHARPE (20-TRADE)",
         ))
         st.plotly_chart(fig_rs, use_container_width=True)
         st.caption("Rolling 20-trade Sharpe ratio — values >1.0 indicate strong risk-adjusted returns")
@@ -466,12 +498,12 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig4.update_layout(
             **plotly_dark_layout(
             title={"text": "TRADE P&L DISTRIBUTION", "font": {"size": 10, "color": TEXT3}},
-            height=240, xaxis_title="P&L ($)", yaxis_title="Count",
+            height=240, xaxis_title="P&L ($)", yaxis_title="COUNT",
         ))
         st.plotly_chart(fig4, use_container_width=True)
 
     # --- Kelly Criterion (Live Arb Data) -----
-    with st.expander("📊 Kelly Criterion — Live Arb Sizing", expanded=False):
+    with st.expander("KELLY CRITERION — ARB SIZING", expanded=False):
         # --- Configurable bankroll input -----
         _bankroll_input = st.number_input(
             "BANKROLL ($)",
@@ -479,28 +511,19 @@ text-transform:uppercase;margin-bottom:3px;'>
             max_value=10_000_000,
             value=10_000,
             step=1_000,
-            help="Your total trading capital. Kelly position size is computed as a fraction of this amount.",
+            help="Total trading capital — Kelly position size is a fraction of this",
             key="p06_kelly_bankroll",
         )
 
         # --- Pull real arb stats from live arbs DB -----
-        _live_arb_count = 0
-        _live_avg_net_edge_cents = 0.0
         try:
-            # Try PostgreSQL live_arbs_cloud first
-            from database.repository import get_engine as _ge_kelly
-            from sqlalchemy import text as _txt_kelly
-            _eng_kelly = _ge_kelly()
-            with _eng_kelly.connect() as _conn_kelly:
-                _k_row = _conn_kelly.execute(_txt_kelly(
-                    "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs_cloud "
-                    "WHERE net_edge_cents > 0"
-                )).fetchone()
-                if _k_row and _k_row[0]:
-                    _live_arb_count = int(_k_row[0])
-                    _live_avg_net_edge_cents = float(_k_row[1] or 0)
+            from dashboard.data_layer import get_live_arbs_cloud_stats as _glas_kelly
+            _kelly_stats = _glas_kelly()
+            _live_arb_count = _kelly_stats.get("count", 0)
+            _live_avg_net_edge_cents = _kelly_stats.get("avg_net_edge_cents", 0.0)
         except Exception:
-            pass
+            _live_arb_count = 0
+            _live_avg_net_edge_cents = 0.0
         # Fallback to live_arbs SQLite
         if _live_arb_count == 0:
             try:
@@ -510,12 +533,32 @@ text-transform:uppercase;margin-bottom:3px;'>
                 if _la_db.exists():
                     _lc = _sq_kelly.connect(str(_la_db), check_same_thread=False)
                     _lk = _lc.execute(
-                        "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs WHERE net_edge_cents > 0"
+                        "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs "
+                        "WHERE net_edge_cents > 0 AND strategy != 'yes_no_complement' "
+                        "AND strategy NOT IN ('yes_no_complement')"
                     ).fetchone()
                     _lc.close()
                     if _lk and _lk[0]:
                         _live_arb_count = int(_lk[0])
                         _live_avg_net_edge_cents = float(_lk[1] or 0)
+            except Exception:
+                pass
+        # Fallback: Neon cloud (live_arbs_cloud) — used on Streamlit Cloud where SQLite has no data
+        if _live_arb_count == 0:
+            try:
+                import dashboard.live_arb_store as _las_kelly
+                from sqlalchemy import text as _kelly_text
+                _kelly_eng = getattr(_las_kelly, "_pg_engine", None) or _las_kelly.get_pg_engine_cached()
+                if _kelly_eng is not None:
+                    with _kelly_eng.connect() as _kelly_c:
+                        _kelly_row = _kelly_c.execute(_kelly_text(
+                            "SELECT COUNT(*), AVG(net_edge_cents) FROM live_arbs_cloud "
+                            "WHERE net_edge_cents > 0 AND strategy_type NOT IN "
+                            "('yes_no_complement')"
+                        )).fetchone()
+                    if _kelly_row and _kelly_row[0]:
+                        _live_arb_count = int(_kelly_row[0])
+                        _live_avg_net_edge_cents = float(_kelly_row[1] or 0)
             except Exception:
                 pass
         # Final fallback: use backtest trade stats if no live data
@@ -525,11 +568,11 @@ text-transform:uppercase;margin-bottom:3px;'>
 
         # --- Display live arb stats -----
         _lk_c1, _lk_c2 = st.columns(2)
-        _lk_c1.metric("LIVE ARB RECORDS", f"{_live_arb_count:,}", help="Count of YNC arbs in live_arbs DB with net_edge_cents > 0")
-        _lk_c2.metric("AVG NET EDGE", f"{_live_avg_net_edge_cents:.2f}¢", help="Average net edge per arb after Kalshi fees")
+        _lk_c1.metric("LIVE ARB RECORDS", f"{_live_arb_count:,}", help="CE/ME/TH arbs in live_arbs DB with net_edge_cents > 0")
+        _lk_c2.metric("AVG NET EDGE", f"{_live_avg_net_edge_cents:.2f}¢", help="AVERAGE NET EDGE PER ARB AFTER KALSHI FEES")
 
-        # --- Kelly formula for YNC arbs -----
-        _P_CE = 0.95  # assumed win probability for YES/NO complement arbs
+        # --- Kelly formula ---
+        _P_CE = 0.95  # assumed win probability (conservative estimate)
         _net_edge_frac = _live_avg_net_edge_cents / 100.0  # convert cents to dollars (fraction of $1)
         _cost_to_enter = max(1.0 - _net_edge_frac, 0.01)  # avoid divide-by-zero
         _b_ratio = _net_edge_frac / _cost_to_enter if _cost_to_enter > 0 else 0.0
@@ -541,45 +584,42 @@ text-transform:uppercase;margin-bottom:3px;'>
 
             _kl_c1, _kl_c2, _kl_c3 = st.columns(3)
             _kl_c1.metric("KELLY FRACTION", f"{_kelly_live * 100:.2f}%", help="Full Kelly bet size as % of bankroll (p=0.95)")
-            _kl_c2.metric("HALF-KELLY", f"{_half_kelly_live * 100:.2f}%", help="Recommended safer bet size")
+            _kl_c2.metric("HALF-KELLY", f"{_half_kelly_live * 100:.2f}%", help="RECOMMENDED SAFER BET SIZE")
             _kl_c3.metric(
                 "RECOMMENDED POSITION SIZE",
                 f"${_rec_pos_size:,.2f}",
-                help=f"Half-Kelly × bankroll (${_bankroll_input:,}). Based on avg YNC arb edge {_live_avg_net_edge_cents:.2f}¢.",
+                help=f"Half-Kelly × bankroll (${_bankroll_input:,}). Based on avg arb edge {_live_avg_net_edge_cents:.2f}¢ .",
             )
             st.progress(min(_kelly_live, 1.0))
             st.caption(
-                f"Kelly formula: (p×b − (1−p)) / b · p={_P_CE} (YNC win prob) · "
-                f"b={_b_ratio:.4f} (net_edge/cost_to_enter) · "
-                f"net_edge={_live_avg_net_edge_cents:.2f}¢ · "
-                f"cost_to_enter={_cost_to_enter*100:.2f}¢. "
-                f"Half-Kelly = ${_rec_pos_size:,.2f} per arb on a ${_bankroll_input:,} bankroll."
+                f"KELLY: P={_P_CE} · B={_b_ratio:.4f} (NET/COST) · NET={_live_avg_net_edge_cents:.2f}¢ · "
+                f"COST={_cost_to_enter*100:.2f}¢ · HALF-KELLY = ${_rec_pos_size:,.2f} ON ${_bankroll_input:,}"
             )
             if _kelly_live > 0.25:
-                st.warning(f"High Kelly fraction ({_kelly_live:.0%}) — use half-Kelly or less to control ruin risk")
+                st.caption(f"HIGH KELLY FRACTION ({_kelly_live:.0%}) — CONSIDER HALF-KELLY")
             # Position sizing table for common bankrolls
             _kelly_br_rows = []
             for _br in [1_000, 5_000, _bankroll_input, 50_000, 100_000]:
                 _kelly_br_rows.append({
-                    "Bankroll": f"${_br:,}",
-                    "Full Kelly $": f"${_br * _kelly_live:,.2f}",
-                    "Half Kelly $": f"${_br * _half_kelly_live:,.2f}",
-                    "Quarter Kelly $": f"${_br * _kelly_live * 0.25:,.2f}",
+                    "BANKROLL": f"${_br:,}",
+                    "FULL KELLY $": f"${_br * _kelly_live:,.2f}",
+                    "HALF KELLY $": f"${_br * _half_kelly_live:,.2f}",
+                    "QUARTER KELLY $": f"${_br * _kelly_live * 0.25:,.2f}",
                 })
             # Deduplicate rows by bankroll label
             _seen_br = set()
             _dedup_rows = []
             for _r in _kelly_br_rows:
-                if _r["Bankroll"] not in _seen_br:
-                    _seen_br.add(_r["Bankroll"])
+                if _r["BANKROLL"] not in _seen_br:
+                    _seen_br.add(_r["BANKROLL"])
                     _dedup_rows.append(_r)
             st.dataframe(pd.DataFrame(_dedup_rows), use_container_width=True, hide_index=True)
-            st.caption("p=0.95 assumed win probability for YNC arbs. Adjust bankroll input above to update position sizes.")
+            st.caption("P=0.95 ASSUMED WIN PROBABILITY · ADJUST BANKROLL ABOVE TO UPDATE")
         else:
-            st.info("Insufficient live arb data to compute Kelly fraction. Ensure the live arb scanner is running and has logged arbs.")
+            st.caption("INSUFFICIENT ARB DATA FOR KELLY FRACTION")
 
     # --- Kelly Criterion (Backtest) -----
-    with st.expander("📊 Kelly Criterion — Backtest History", expanded=False):
+    with st.expander("KELLY CRITERION — BACKTEST HISTORY", expanded=False):
         try:
             _wr = float(metrics.get("win_rate", 0))
             _wins = pnl_series[pnl_series > 0]
@@ -587,9 +627,9 @@ text-transform:uppercase;margin-bottom:3px;'>
             _avg_win_k = float(_wins.mean()) if len(_wins) > 0 else 0.0
             _avg_loss_k = float(_losses.abs().mean()) if len(_losses) > 0 else 0.0
             if _wr < 0.5 or _avg_win_k <= 0:
-                st.error("Kelly undefined or negative — strategy has negative edge")
+                st.caption("Kelly undefined or negative — strategy has negative edge")
             elif _wr == 0 or _avg_win_k == 0:
-                st.info("Insufficient data — need at least one winning and one losing trade to compute Kelly fraction.")
+                st.caption("INSUFFICIENT DATA FOR KELLY FRACTION")
             else:
                 _kelly = (_wr * _avg_win_k - (1 - _wr) * _avg_loss_k) / _avg_win_k
                 _kelly = min(_kelly, 1.0)  # cap at 100%
@@ -599,23 +639,23 @@ text-transform:uppercase;margin-bottom:3px;'>
                 _kc2.metric("HALF-KELLY", f"{_half_kelly * 100:.1f}%")
                 # Visual gauge: Kelly fraction vs full Kelly
                 st.progress(min(_kelly, 1.0))
-                st.caption(f"Recommended bet size: {_half_kelly * 100:.1f}% of bankroll (half-Kelly)")
+                st.caption(f"RECOMMENDED BET SIZE: {_half_kelly * 100:.1f}% OF BANKROLL (HALF-KELLY)")
                 if _kelly > 0.25:
-                    st.warning(f"⚠️ High Kelly fraction (>{_kelly:.0%}) — consider sizing down to avoid ruin risk")
+                    st.caption(f"HIGH KELLY FRACTION (>{_kelly:.0%}) — CONSIDER HALF-KELLY")
                 # Bankroll sizing table
                 _bankrolls = [1_000, 5_000, 10_000, 50_000, 100_000]
                 _br_rows = []
                 for _br in _bankrolls:
                     _br_rows.append({
-                        "Bankroll": f"${_br:,}",
-                        "Full Kelly $": f"${_br * _kelly:,.2f}",
-                        "Half Kelly $": f"${_br * _half_kelly:,.2f}",
-                        "Quarter Kelly $": f"${_br * _kelly * 0.25:,.2f}",
+                        "BANKROLL": f"${_br:,}",
+                        "FULL KELLY $": f"${_br * _kelly:,.2f}",
+                        "HALF KELLY $": f"${_br * _half_kelly:,.2f}",
+                        "QUARTER KELLY $": f"${_br * _kelly * 0.25:,.2f}",
                     })
                 st.dataframe(pd.DataFrame(_br_rows), use_container_width=True, hide_index=True)
-                st.caption("Kelly fraction = optimal bet size as % of bankroll. Half-Kelly is safer in practice.")
+                st.caption("KELLY FRACTION = OPTIMAL BET SIZE % OF BANKROLL · HALF-KELLY SAFER IN PRACTICE")
         except Exception as _ke:
-            st.caption(f"Kelly Criterion unavailable: {_ke}")
+            st.caption(f"KELLY CRITERION UNAVAILABLE: {_ke}")
 
     # --- Position Sizing Recommendations -----
     st.markdown(
@@ -633,31 +673,29 @@ text-transform:uppercase;margin-bottom:3px;'>
             _kelly_ps = (_wr_ps * _avg_win_ps - (1 - _wr_ps) * _avg_loss_ps) / _avg_win_ps
             _kelly_ps = min(_kelly_ps, 1.0)
             if _kelly_ps < 0:
-                st.warning("❌ Negative Kelly — do not trade this strategy")
-            elif _kelly_ps < 0.05:
-                st.info("📊 Small edge: consider fixed-size trades (e.g. 5 contracts per arb)")
+                st.caption("NEGATIVE KELLY — STRATEGY HAS NEGATIVE EDGE IN THIS BACKTEST WINDOW")
             elif _kelly_ps <= 0.25:
-                st.info(f"✅ Standard position: {_kelly_ps*100:.0f}% of bankroll per trade")
+                st.caption(f"KELLY FRACTION: {_kelly_ps*100:.0f}% OF BANKROLL PER TRADE")
             else:
-                st.warning(f"⚠️ Kelly suggests >25% of bankroll — use half-Kelly (cap at 10%)")
+                st.caption(f"KELLY FRACTION: {_kelly_ps*100:.0f}% — CONSIDER HALF-KELLY ({_kelly_ps*50:.0f}%)")
         else:
-            st.info("Insufficient trade data to compute position sizing recommendation.")
+            st.caption("INSUFFICIENT TRADE DATA TO COMPUTE POSITION SIZING")
     except Exception as _ps_err:
-        st.caption(f"Position sizing unavailable: {_ps_err}")
+        st.caption(f"POSITION SIZING UNAVAILABLE: {_ps_err}")
 
     # --- Monte Carlo Simulation -----
-    with st.expander("🎲 Monte Carlo Simulation", expanded=False):
+    with st.expander("MONTE CARLO SIMULATION", expanded=False):
         try:
             if len(pnl_series) < 5:
-                st.info("Fewer than 5 trades — Monte Carlo simulation skipped.")
+                st.caption("Fewer than 5 trades — Monte Carlo skipped")
             else:
                 _pnl_arr = pnl_series.values
                 _n = len(_pnl_arr)
                 n_sims = st.slider(
-                    "Simulation paths",
+                    "SIMULATION PATHS",
                     min_value=100, max_value=2000, value=500, step=100,
                     key="p06_mc_n_sims",
-                    help="Number of bootstrap paths to simulate. More paths = smoother fan chart, slower render.",
+                    help="Bootstrap paths to simulate — more = smoother fan chart, slower render",
                 )
                 results = []
                 for _ in range(n_sims):
@@ -679,7 +717,7 @@ text-transform:uppercase;margin-bottom:3px;'>
                 _mc_m1, _mc_m2, _mc_m3 = st.columns(3)
                 _mc_m1.metric("P&L 5th pct (final)",  f"${float(low_path[-1]):.4f}")
                 _mc_m2.metric("P&L 95th pct (final)", f"${float(high_path[-1]):.4f}")
-                _mc_m3.metric("P(Positive Final P&L)", f"{_p_pos*100:.1f}%")
+                _mc_m3.metric("P(POSITIVE FINAL P&L)", f"{_p_pos*100:.1f}%")
 
                 _trade_nums = list(range(1, _n + 1))
 
@@ -692,7 +730,7 @@ text-transform:uppercase;margin-bottom:3px;'>
                     fill="toself",
                     fillcolor="rgba(59,130,246,0.12)",
                     line={"width": 0},
-                    name="5th–95th pct band",
+                    name="5TH–95TH PCT BAND",
                     showlegend=True,
                     hoverinfo="skip",
                 ))
@@ -701,7 +739,7 @@ text-transform:uppercase;margin-bottom:3px;'>
                     x=_trade_nums,
                     y=low_path,
                     mode="lines",
-                    name="5th pct",
+                    name="5TH PCT",
                     line={"color": RED, "width": 1.2, "dash": "dot"},
                 ))
                 # 95th percentile upper bound
@@ -709,7 +747,7 @@ text-transform:uppercase;margin-bottom:3px;'>
                     x=_trade_nums,
                     y=high_path,
                     mode="lines",
-                    name="95th pct",
+                    name="95TH PCT",
                     line={"color": GREEN, "width": 1.2, "dash": "dot"},
                 ))
                 # Median path
@@ -717,23 +755,22 @@ text-transform:uppercase;margin-bottom:3px;'>
                     x=_trade_nums,
                     y=median_path,
                     mode="lines",
-                    name="Median (50th pct)",
+                    name="MEDIAN (50TH PCT)",
                     line={"color": BLUE, "width": 2.0},
                 ))
                 _fig_mc.add_hline(y=0, line_dash="dash", line_color=TEXT3, line_width=0.8)
                 _fig_mc.update_layout(
                     **plotly_dark_layout(
-                    title={"text": "Monte Carlo Simulation (1000 paths, 5th/95th confidence band)",
+                    title={"text": "MONTE CARLO SIMULATION (1000 PATHS, 5TH/95TH CONFIDENCE BAND)",
                            "font": {"size": 10, "color": TEXT3}},
                     height=300,
-                    xaxis_title="Trade number",
-                    yaxis_title="Cumulative P&L ($)",
+                    xaxis_title="TRADE NUMBER",
+                    yaxis_title="CUMULATIVE P&L ($)",
                     legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                     margin={"l": 55, "r": 20, "t": 35, "b": 40},
                 ))
                 st.plotly_chart(_fig_mc, use_container_width=True)
-                st.caption(f"Bootstrap simulation ({n_sims} iterations) testing sensitivity to trade order. "
-                           "Blue = median path; shaded band = 5th–95th percentile range.")
+                st.caption(f"BOOTSTRAP SIMULATION ({n_sims} ITERATIONS) · SENSITIVITY TO TRADE ORDER · BLUE = MEDIAN PATH · SHADED = 5TH–95TH PERCENTILE")
 
                 # Ruin probability metric
                 st.metric(
@@ -744,9 +781,9 @@ text-transform:uppercase;margin-bottom:3px;'>
                          f"(i.e. cumulative P&L < ${_ruin_threshold:,.2f}).",
                 )
                 if _p_ruin > 0.10:
-                    st.warning(f"Ruin probability ({_p_ruin:.0%}) exceeds 10% — consider reducing position size.")
+                    st.caption(f"RUIN PROBABILITY {_p_ruin:.0%} EXCEEDS 10%")
         except Exception as _mc_err:
-            st.caption(f"Monte Carlo simulation unavailable: {_mc_err}")
+            st.caption(f"MONTE CARLO SIMULATION UNAVAILABLE: {_mc_err}")
 
     # --- Full metrics -----
     with st.expander("ALL METRICS"):
@@ -792,7 +829,7 @@ text-transform:uppercase;margin-bottom:3px;'>
         fig_strat.update_layout(
             **plotly_dark_layout(
             title={"text": "TOTAL P&L BY STRATEGY", "font": {"size": 10, "color": TEXT3}},
-            height=220, xaxis_title="", yaxis_title="Total P&L ($)",
+            height=220, xaxis_title="", yaxis_title="TOTAL P&L ($)",
         ))
         st.plotly_chart(fig_strat, use_container_width=True)
 
@@ -820,10 +857,10 @@ text-transform:uppercase;margin-bottom:3px;'>
             _pf = (_gross_wins / _gross_losses) if _gross_losses > 0 else float("inf")
             _pf_str = f"{_pf:.2f}" if _gross_losses > 0 else "∞"
             _sc_rows.append({
-                "STRATEGY": str(_strat_name).replace("_", " ").upper(),
+                "STRATEGY": {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}.get(str(_strat_name).lower(), str(_strat_name).upper()[:6]),
                 "TRADES": _n,
                 "WIN RATE": f"{_wr * 100:.1f}%",
-                "AVG P&L (c)": f"{_avg * 100:.2f}",
+                "AVG P&L (¢)": f"{_avg * 100:.2f}",
                 "SHARPE": _sharpe,
                 "MAX DRAWDOWN": f"${_mdd:.4f}",
                 "PROFIT FACTOR": _pf_str,
@@ -872,7 +909,7 @@ text-transform:uppercase;margin-bottom:3px;'>
                 _best_row = max(_sc_rows, key=lambda r: r["_sharpe_sort"])
                 _best_name = _best_row["STRATEGY"]
                 _best_sharpe = float(_best_row["_sharpe_sort"])
-                st.success(f"Best by Sharpe: {_best_name} ({_best_sharpe:.2f})")
+                st.caption(f"BEST BY SHARPE: {_best_name} ({_best_sharpe:.2f})")
 
     # --- Interactive filter controls -----
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -880,14 +917,14 @@ text-transform:uppercase;margin-bottom:3px;'>
     _fc1, _fc2, _fc3 = st.columns(3)
     with _fc1:
         fee_mult = st.slider(
-            "Fee multiplier",
+            "FEE MULTIPLIER",
             min_value=0.5, max_value=2.0, value=1.0, step=0.1,
             key="p06_fee_mult",
         )
-        st.caption("1.0 = standard Kalshi fees. >1.0 = stress test with higher fees.")
+        st.caption("1.0 = standard Kalshi fees · >1.0 = stress test with higher fees")
     with _fc2:
         min_edge_cents = st.slider(
-            "Min net edge (¢)",
+            "MIN NET EDGE (¢)",
             min_value=0, max_value=20, value=2, step=1,
             key="p06_min_edge",
         )
@@ -900,7 +937,7 @@ text-transform:uppercase;margin-bottom:3px;'>
             "SS":  "superset",
         }
         selected_abbrevs = st.multiselect(
-            "Strategies to include",
+            "STRATEGIES TO INCLUDE",
             options=list(_STRATEGY_ABBREV.keys()),
             default=list(_STRATEGY_ABBREV.keys()),
             key="p06_strategies",
@@ -929,9 +966,9 @@ text-transform:uppercase;margin-bottom:3px;'>
 
     # --- Trade log -----
     st.markdown("#### TRADE LOG")
-    st.caption("Simulated trades only — these are hypothetical entries generated by replaying historical order-book data. No real orders were placed.")
+    st.caption("Simulated trades only — hypothetical entries from historical order-book replay · no real orders placed")
     if _filtered.empty:
-        st.info("No trades match the current filter settings.")
+        st.caption("NO TRADES MATCH THE CURRENT FILTER SETTINGS")
     else:
         st.dataframe(_filtered, use_container_width=True, height=350, hide_index=True)
 
@@ -949,16 +986,16 @@ text-transform:uppercase;margin-bottom:3px;'>
                 _td1.metric("AVG HOLD TIME", f"{avg_duration:.0f}s")
                 _td2.metric("MAX HOLD TIME", f"{max_duration:.0f}s")
             else:
-                st.caption("Trade duration data not available in this dataset")
+                st.caption("TRADE DURATION DATA NOT AVAILABLE IN THIS DATASET")
         else:
-            st.caption("Trade duration data not available in this dataset")
+            st.caption("TRADE DURATION DATA NOT AVAILABLE IN THIS DATASET")
     except Exception:
-        st.caption("Trade duration data not available in this dataset")
+        st.caption("TRADE DURATION DATA NOT AVAILABLE IN THIS DATASET")
 
     # --- Full Trade Log Export -----
-    with st.expander("📋 Full Trade Log", expanded=False):
+    with st.expander("FULL TRADE LOG", expanded=False):
         if _filtered.empty:
-            st.info("No trades match the current filter settings.")
+            st.caption("NO TRADES MATCH FILTERS")
         else:
             _log = _filtered.copy()
 
@@ -970,25 +1007,25 @@ text-transform:uppercase;margin-bottom:3px;'>
             if "entry_ts" in _log.columns:
                 _ts_col = pd.to_datetime(_log["entry_ts"], utc=True, errors="coerce")
                 try:
-                    _log_display["Date (ET)"] = _ts_col.dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d %H:%M:%S")
+                    _log_display["DATE (ET)"] = _ts_col.dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
-                    _log_display["Date (ET)"] = _ts_col.dt.strftime("%Y-%m-%d %H:%M:%S")
+                    _log_display["DATE (ET)"] = _ts_col.dt.strftime("%Y-%m-%d %H:%M:%S")
             else:
-                _log_display["Date (ET)"] = "--"
+                _log_display["DATE (ET)"] = "--"
 
-            _log_display["Ticker"] = _log.get("ticker", pd.Series(["--"] * len(_log))).fillna("--").values
-            _log_display["Strategy"] = _log.get("strategy_type", pd.Series(["--"] * len(_log))).fillna("--").values
+            _log_display["TICKER"] = _log.get("ticker", pd.Series(["--"] * len(_log))).fillna("--").values
+            _log_display["STRATEGY"] = _log.get("strategy_type", pd.Series(["--"] * len(_log))).fillna("--").values
 
             _pnl_col = pd.to_numeric(_log.get("net_pnl", pd.Series([0.0] * len(_log))), errors="coerce").fillna(0)
             _gross_col = pd.to_numeric(_log.get("gross_pnl", _pnl_col), errors="coerce").fillna(0)
 
-            _log_display["Gross (¢)"] = (_gross_col * 100).round(2).values
-            _log_display["Net (¢)"] = (_pnl_col * 100).round(2).values
+            _log_display["GROSS (¢)"] = (_gross_col * 100).round(2).values
+            _log_display["NET (¢)"] = (_pnl_col * 100).round(2).values
             _log_display["P&L ($)"] = _pnl_col.round(6).values
-            _log_display["Classification"] = _log.get("classification", pd.Series(["--"] * len(_log))).fillna("--").values
+            _log_display["CLASSIFICATION"] = _log.get("classification", pd.Series(["--"] * len(_log))).fillna("--").values
 
             # Cumulative P&L column
-            _log_display["Cumulative P&L ($)"] = _pnl_col.cumsum().round(6).values
+            _log_display["CUMULATIVE P&L ($)"] = _pnl_col.cumsum().round(6).values
 
             # Color-code P&L column via Styler
             def _color_pnl_row(val):
@@ -998,7 +1035,7 @@ text-transform:uppercase;margin-bottom:3px;'>
                 except (TypeError, ValueError):
                     return ""
 
-            _log_styler = _log_display.style.applymap(_color_pnl_row, subset=["P&L ($)", "Cumulative P&L ($)"])
+            _log_styler = _log_display.style.applymap(_color_pnl_row, subset=["P&L ($)", "CUMULATIVE P&L ($)"])
             st.dataframe(_log_styler, use_container_width=True, height=400, hide_index=True)
 
             # Summary line
@@ -1014,7 +1051,7 @@ text-transform:uppercase;margin-bottom:3px;'>
             # CSV export — all columns (not truncated to display subset)
             _csv_bytes = _filtered.to_csv(index=False).encode("utf-8")
             st.download_button(
-                label="⬇️ Export Trade Log (all columns)",
+                label="⬇️ Export CSV",
                 data=_csv_bytes,
                 file_name="kalshi_trade_log.csv",
                 mime="text/csv",
@@ -1081,7 +1118,7 @@ color:{TEXT};'>{val_str}</span>
 def _render_strategy_comparison(runs_df: pd.DataFrame):
     """Render a multi-run comparison chart from the runs summary DataFrame."""
     if runs_df.empty or "run_id" not in runs_df.columns:
-        st.info("No runs available for comparison.")
+        st.caption("NO RUNS AVAILABLE FOR COMPARISON")
         return
 
     # Scatter: n_trades vs total_pnl, colored by win_rate
@@ -1115,8 +1152,8 @@ def _render_strategy_comparison(runs_df: pd.DataFrame):
             title={"text": "RUNS: TRADES vs TOTAL P&L (size=win rate)",
                    "font": {"size": 10, "color": TEXT3}},
             height=280,
-            xaxis_title="# Trades",
-            yaxis_title="Total P&L ($)",
+            xaxis_title="# TRADES",
+            yaxis_title="TOTAL P&L ($)",
         ))
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1136,35 +1173,26 @@ def _render_strategy_comparison(runs_df: pd.DataFrame):
         fig2.update_layout(
             **plotly_dark_layout(
             title={"text": "WIN RATE BY RUN", "font": {"size": 10, "color": TEXT3}},
-            height=200, xaxis_title="", yaxis_title="Win Rate (%)",
+            height=200, xaxis_title="", yaxis_title="WIN RATE (%)",
         ))
         st.plotly_chart(fig2, use_container_width=True)
 
     # Summary table — ensure Win Rate shown as formatted percentage
     _runs_display = runs_df.copy()
     if "win_rate" in _runs_display.columns:
-        _runs_display["Win Rate %"] = pd.to_numeric(_runs_display["win_rate"], errors="coerce").apply(
+        _runs_display["WIN RATE %"] = pd.to_numeric(_runs_display["win_rate"], errors="coerce").apply(
             lambda v: f"{v*100:.1f}%" if pd.notna(v) else "--"
         )
     elif "n_trades" in _runs_display.columns and "n_wins" in _runs_display.columns:
         _nt = pd.to_numeric(_runs_display["n_trades"], errors="coerce")
         _nw = pd.to_numeric(_runs_display["n_wins"], errors="coerce")
-        _runs_display["Win Rate %"] = (_nw / _nt.replace(0, float("nan")) * 100).apply(
+        _runs_display["WIN RATE %"] = (_nw / _nt.replace(0, float("nan")) * 100).apply(
             lambda v: f"{v:.1f}%" if pd.notna(v) else "--"
         )
     st.dataframe(_runs_display, use_container_width=True, height=180, hide_index=True)
 
 
 def _no_data(title: str, msg: str):
-    from dashboard.styles import PANEL, BORDER, TEXT3
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};
-padding:2rem;border-radius:3px;text-align:center;'>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.85rem;color:{TEXT3};'>
-{title}
-</div>
-<div style='font-size:0.72rem;color:{TEXT3};margin-top:0.5rem;'>{msg}</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption((f"{title} — {msg}" if msg else title).upper())
+
 

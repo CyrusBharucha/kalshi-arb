@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/mutually_exclusive.py
 Strategy 2: Mutually Exclusive & Collectively Exhaustive Outcome Arbitrage
 
