@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_markets_classifier_extended.py
 ==========================================
 Unit tests for markets/classifier.py pure functions:

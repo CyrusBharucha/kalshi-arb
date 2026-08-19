@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_live_orderbook_cache.py
 =====================================
 Unit tests for data/synthesis_live.py LiveOrderbookCache:

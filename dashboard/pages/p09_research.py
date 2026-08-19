@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/pages/p09_research.py
 ================================
 Empirical Research Findings page.
@@ -21,7 +21,7 @@ from dashboard.data_layer import (
     get_research_summary, get_relationship_stats,
     get_historical_arb_stats, get_arb_edge_by_strategy_class,
     get_arb_rolling_7d, get_top_markets_by_volume, get_market_price_history,
-    get_arb_by_category,
+    get_arb_by_category, get_arb_store_stats, get_arb_drought_timestamps,
 )
 from dashboard.styles import plotly_dark_layout, GREEN, RED, AMBER, BLUE, CYAN, TEXT, TEXT2, TEXT3, PANEL, BORDER, PANEL2
 
@@ -38,36 +38,29 @@ Empirical findings &mdash; Kalshi market microstructure &amp; arbitrage
     st.markdown("<hr style='margin:0.5rem 0 0.75rem 0;'>", unsafe_allow_html=True)
 
     # --- Epistemic caveat -----
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {AMBER};
-padding:0.75rem 1rem;border-radius:3px;margin-bottom:1rem;'>
-<div style='font-size:0.65rem;letter-spacing:0.08em;color:{AMBER};
-text-transform:uppercase;margin-bottom:4px;'>DATA QUALITY NOTICE</div>
-<div style='font-size:0.72rem;color:{TEXT2};line-height:1.6;'>
-Results below are clearly labelled:
-<span style='color:{GREEN};font-family:JetBrains Mono,monospace;'>OBSERVED</span> &mdash; directly measured from data &nbsp;|&nbsp;
-<span style='color:{BLUE};font-family:JetBrains Mono,monospace;'>INFERRED</span> &mdash; derived from model &nbsp;|&nbsp;
-<span style='color:{AMBER};font-family:JetBrains Mono,monospace;'>PRELIMINARY</span> &mdash; limited data coverage &nbsp;|&nbsp;
-<span style='color:{TEXT3};font-family:JetBrains Mono,monospace;'>UNVERIFIED</span> &mdash; not yet tested<br>
-No profitable trading is claimed unless data explicitly demonstrates positive after-fee net P&L.
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption("OBSERVED = live measured · INFERRED = model-derived · PRELIMINARY = limited coverage · UNVERIFIED = untested")
 
     from dashboard.data_layer import get_system_health
     _health = get_system_health()
     _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
 
+    # Check Neon availability for banner
+    from dashboard.neon_utils import is_neon_connected as _is_neon_p09
+    _p09_neon_ok = _is_neon_p09()
+
     # --- Info banner -----
-    if _is_sqlite:
-        st.markdown(
-            f"<div style='background:{PANEL};border:1px solid {AMBER};border-left:4px solid {AMBER};"
-            f"padding:0.65rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-size:0.72rem;"
-            f"color:{TEXT2};font-family:JetBrains Mono,monospace;line-height:1.6;'>"
-            f"Research platform · live arb scanner active · reference DB loaded</div>",
-            unsafe_allow_html=True,
-        )
+    if _p09_neon_ok:
+        _p09_neon_count = 0
+        try:
+            from dashboard.data_layer import get_live_arbs_cloud_stats as _p09_cls
+            _p09_stats = _p09_cls()
+            _p09_neon_count = _p09_stats.get("count", 0) or 0
+        except Exception:
+            pass
+        _p09_count_str = f"{_p09_neon_count:,} arbs logged" if _p09_neon_count > 0 else "arbs logged to Neon"
+        st.caption(f"Neon cloud · {_p09_count_str} · CE/ME/TH scanners active · YNC not executable")
+    elif _is_sqlite:
+        st.caption("CE/ME/TH scanners active · YNC not executable · reference DB loaded")
 
     # --- Load data -----
     summary      = get_research_summary()
@@ -121,7 +114,8 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
             _hod_exp_conn = _gsc_hod_exp()
             if _hod_exp_conn:
                 _hod_exp_rows = _hod_exp_conn.execute(
-                    "SELECT detected_at FROM arbitrage_opportunities WHERE detected_at IS NOT NULL"
+                    "SELECT detected_at FROM arbitrage_opportunities WHERE detected_at IS NOT NULL "
+                    "AND strategy_type NOT IN ('yes_no_complement')"
                 ).fetchall()
                 _hod_exp_conn.close()
                 if _hod_exp_rows:
@@ -152,6 +146,7 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
                     "COUNT(*) AS cnt "
                     "FROM arbitrage_opportunities "
                     "WHERE strategy_type IS NOT NULL AND gross_edge_cents IS NOT NULL "
+                    "AND strategy_type NOT IN ('yes_no_complement') "
                     "GROUP BY strategy_type ORDER BY avg_net DESC"
                 ).fetchall()
                 _fi_exp_conn.close()
@@ -174,7 +169,7 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
         from datetime import datetime as _dt_exp, timezone as _tz_exp
         _exp_fname = f"kalshi_research_{_dt_exp.now(_tz_exp.utc).strftime('%Y%m%d_%H%M%S')}.csv"
         st.download_button(
-            label="⬇ Export research data (CSV)",
+            label="⬇ Export CSV",
             data=_exp_csv,
             file_name=_exp_fname,
             mime="text/csv",
@@ -185,7 +180,7 @@ No profitable trading is claimed unless data explicitly demonstrates positive af
 
     # --- Tabs -----
     t1, t2, t3, t4, t5, t6, t7 = st.tabs([
-        "RELATIONSHIPS", "STRATEGY PERFORMANCE", "ARB FINDINGS",
+        "RELATIONSHIPS", "STRATEGY PERFORMANCE", "DETECTION FINDINGS",
         "DATA COVERAGE", "CROSS-ASSET", "PRICE HISTORY", "METHODOLOGY",
     ])
 
@@ -223,27 +218,29 @@ Live L2 orderbook data streams from Kalshi's Synthesis WebSocket feed at ~3,400 
 The `ws_bridge.py` scanner processes each message on a 1-second cycle.
 
 ### 2. Strategy Detection
-- **YNC (YES/NO Complement)**: Detects when YES ask + NO ask < $1.00 on the same contract after fees.
-  Kalshi guarantees exactly one leg pays $1.00, so buying both sides at a combined cost below $1.00 is risk-free.
-
-CE, ME, TH, and SS strategies were implemented and tested but are currently disabled — they produced too many
-false positives due to Kalshi API metadata inconsistencies. YNC remains because it is structurally unambiguous:
-no external validation is needed beyond live bid/ask prices.
+- **YNC (YES/NO Complement)**: Detects when YES ask + NO ask < 100¢ on the same contract after fees.
+  In practice, Kalshi prices YES and NO as complements (NO ask = 1 − YES bid), so sum = 1 + spread ≥ 100¢ always — YNC detections are feed/rounding artifacts only, not executable.
+- **ME (Mutually Exclusive)**: Detects when the sum of NO asks across all outcomes of one event is below N−1.
+  Buying all NO legs costs < N−1, guaranteeing a $1 net payout when exactly one outcome resolves YES.
+- **TH (Threshold Order)**: Detects when a superset YES leg + subset NO leg are mispriced (monotonicity violation).
+- **CE (Collectively Exhaustive)**: Active — sum of YES asks < 100¢ across all event outcomes. Gate 0 series classification filters false positives by market type.
 
 ### 3. Fee Calculation
 Uses Kalshi's canonical fee: `min($0.035, ceil(0.07 × P × (1−P) × 100) / 100)` per contract.
 Ceil (not round) ensures conservative fee estimates. Net edge must clear **2¢** after both legs' fees.
 
-### 4. Validation Gates (YNC)
-Each detected opportunity passes 4 sequential checks before being logged:
-- **Gate 1**: Numeric — YES ask + NO ask < 1.00; net edge ≥ 2¢ after fees; gross < 10¢ sanity cap
-- **Gate 2**: Price floor — both asks above 5¢ (eliminates stale near-zero quotes)
-- **Gate 3**: Min-tick illiquidity — blocked if either leg quotes at the 1¢ Kalshi minimum tick
+### 4. Validation Gates (YNC / ME / TH)
+Each detected opportunity passes sequential checks before being logged. Gate 1 varies by strategy; Gates 2–4 are shared:
+- **Gate 1 (YNC)**: YES ask + NO ask < 1.00; net edge ≥ 2¢ after fees; gross < 10¢ sanity cap
+- **Gate 1 (ME)**: Σ NO asks < N−1 (N = leg count); net edge ≥ 2¢; all legs must have fresh Synthesis quotes
+- **Gate 1 (TH)**: Superset YES ask + subset NO ask < 1.00; monotonicity check; gross ≤ 10¢
+- **Gate 2**: Price floor — all asks above 5¢ (eliminates stale near-zero quotes)
+- **Gate 3**: Min-tick illiquidity — blocked if any leg quotes at the 1¢ Kalshi minimum tick
 - **Gate 4**: TTL dedup — same opportunity re-logged at most once per 5 minutes
 
 ### 5. Classification
-- **Class A**: Live L2 orderbook confirmed — executable right now
-- **Class B**: Snapshot-derived — likely executable, verify before trading
+- **Class A**: Live L2 orderbook confirmed — executable right now (Executable arbs only; YNC not executable on Kalshi)
+- **Class B**: Snapshot-derived — likely executable, verify before trading (CE/ME/TH arbs)
 - **Class C**: Trade-tape derived — historical evidence, no guarantee
 """)
 
@@ -252,10 +249,7 @@ def _render_relationships(summary: dict, rel_stats: dict):
     st.markdown("#### CONTRACT RELATIONSHIP DETECTION")
 
     _badge("OBSERVED", GREEN)
-    st.markdown("""
-Contract relationships are detected from the Kalshi market structure using
-logical constraints derived from event definitions and contract rules.
-""")
+    st.caption("RELATIONSHIPS DETECTED FROM KALSHI EVENT STRUCTURE VIA LOGICAL CONSTRAINTS")
 
     if rel_stats:
         total = sum(v["count"] for v in rel_stats.values())
@@ -276,14 +270,14 @@ logical constraints derived from event definitions and contract rules.
                 **plotly_dark_layout(
                 title={"text": "RELATIONSHIPS BY TYPE", "font": {"size": 10, "color": TEXT3}},
                 height=200,
-                xaxis_title="Count", yaxis_title="",
+                xaxis_title="COUNT", yaxis_title="",
                 yaxis={"autorange": "reversed"},
                 margin={"l": 30, "r": 20, "t": 30, "b": 30},
             ))
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("**Relationship Types**")
-        st.caption("Avg confidence = 1.000 by design — the classifier uses logical constraints derived from contract rules, not probabilistic models.")
+        st.caption("Avg confidence = 1.000 by design (logic-derived, not probabilistic)")
         for rel_type, data in rel_stats.items():
             conf = data.get("avg_confidence", 0)
             _stat_row(
@@ -292,35 +286,24 @@ logical constraints derived from event definitions and contract rules.
                 f"avg confidence: {conf:.3f}",
             )
     else:
-        _no_data_panel("No relationship data in database.")
+        _no_data_panel("NO RELATIONSHIP DATA IN DATABASE.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     _badge("OBSERVED", GREEN)
     _compl_ct  = f"{rel_stats.get('complement',       {}).get('count', 0):,}" if rel_stats else "—"
     _sups_ct   = f"{rel_stats.get('superset',         {}).get('count', 0):,}" if rel_stats else "—"
     _thresh_ct = f"{rel_stats.get('threshold_order',  {}).get('count', 0):,}" if rel_stats else "—"
-    st.markdown(f"""
-**Relationship detection methodology (3 types detected):**
-- **Complement** ({_compl_ct} pairs): Two contracts whose YES prices must sum to ~100¢ by construction. Any sustained deviation is a risk-free arb.
-- **Superset** ({_sups_ct} pairs): Superset outcome structurally includes subset. Superset must be priced ≥ subset at all times.
-- **Threshold order** ({_thresh_ct} pairs): Adjacent threshold-strike contracts with forced price monotonicity. Price inversions yield risk-free spread trades.
-""")
+    st.caption(f"Complement ({_compl_ct} pairs): YES+NO ≥100¢ always (feed artifacts only) · Superset ({_sups_ct} pairs): superset ≥ subset always · Threshold order ({_thresh_ct} pairs): monotonicity violations = executable spread")
 
     # --- Live complement arb candidates (from WS feed) -----
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.4rem;'>LIVE COMPLEMENT ARB CANDIDATES (WS FEED)</div>",
+        f"color:{TEXT3};margin-bottom:0.4rem;'>LIVE YES/NO SPREAD MONITOR (WS FEED — YNC structural: always ≥ $1.00)</div>",
         unsafe_allow_html=True,
     )
     _badge("OBSERVED", GREEN)
-    st.markdown(
-        "<span style='font-size:0.7rem;color:" + TEXT2 + ";'>Markets ranked by <b>yes_ask + no_ask</b> "
-        "closest to 1.00. Any row where the sum is below 1.00 is a profitable complement arb "
-        "(buy YES + buy NO costs less than the guaranteed $1 payout). "
-        "Sum above 1.00 means both legs are overpriced.</span>",
-        unsafe_allow_html=True,
-    )
+    st.caption("Ranked by yes_ask+no_ask closest to 1.00 · sum <1.00 = feed artifact · >1.00 = normal (bid-ask spread)")
     try:
         from dashboard.live_state import get_live_state as _gls_rel
         _ws_rel = _gls_rel()
@@ -349,18 +332,9 @@ logical constraints derived from event definitions and contract rules.
             # Highlight profitable rows
             _n_prof = int((_df_rel["gap_to_arb"] > 0).sum()) if not _df_rel.empty else 0
             if _n_prof:
-                st.markdown(
-                    f"<div style='color:{GREEN};font-family:JetBrains Mono,monospace;font-size:0.7rem;"
-                    f"margin-bottom:0.3rem;'>● {_n_prof} PROFITABLE complement arb(s) detected live</div>",
-                    unsafe_allow_html=True,
-                )
+                st.caption(f"{_n_prof} quote(s) below parity — feed/rounding artifact · not executable")
             else:
-                st.markdown(
-                    f"<div style='color:{TEXT3};font-family:JetBrains Mono,monospace;font-size:0.7rem;"
-                    f"margin-bottom:0.3rem;'>No profitable complement arbs detected live. "
-                    f"Top rows below are closest to 1.00.</div>",
-                    unsafe_allow_html=True,
-                )
+                st.caption("No quotes below parity live · top rows closest to 100¢ (all ≥100¢ as expected)")
             _df_rel_show = _df_rel.head(20).copy()
             _df_rel_show["yes_ask"] = _df_rel_show["yes_ask"].apply(lambda v: f"{v:.4f}")
             _df_rel_show["no_ask"]  = _df_rel_show["no_ask"].apply(lambda v: f"{v:.4f}")
@@ -376,44 +350,79 @@ logical constraints derived from event definitions and contract rules.
             st.dataframe(
                 _df_rel_show.rename(columns={
                     "ticker": "TICKER", "yes_ask": "YES ASK", "no_ask": "NO ASK",
-                    "sum": "SUM", "gap_to_arb": "GAP TO ARB (1−SUM)",
-                    "potential_profit_cents": "POTENTIAL PROFIT",
+                    "sum": "SUM", "gap_to_arb": "GAP FROM PARITY (1−SUM)",
+                    "potential_profit_cents": "FEED ARTIFACT (¢)",
                     "age_s": "QUOTE AGE",
                 }),
                 use_container_width=True,
                 height=min(400, 45 * len(_df_rel_show) + 45),
                 hide_index=True,
             )
-            st.caption(
-                f"Showing top 20 of {len(_df_rel):,} tracked markets. "
-                "Kalshi taker fee ~3¢/contract; net edge must exceed fees. "
-                "Stale quotes (>60s) may not be fillable at stated price."
-            )
+            st.caption(f"Top 20 of {len(_df_rel):,} tracked markets · below-parity rows are feed artifacts")
         else:
-            _no_data_panel(
-                "No live quotes yet. Start the WebSocket feed: "
-                "the scanner connects automatically when the dashboard is running."
-            )
+            # Neon fallback: show recent YNC records as complement relationship proxy
+            _ync_shown_rel = False
+            try:
+                import dashboard.live_arb_store as _las_rel_ync
+                from sqlalchemy import text as _rel_ync_text
+                _rel_ync_eng = getattr(_las_rel_ync, "_pg_engine", None) or _las_rel_ync.get_pg_engine_cached()
+                if _rel_ync_eng is not None:
+                    with _rel_ync_eng.connect() as _rel_ync_c:
+                        _rel_ync_rows = _rel_ync_c.execute(_rel_ync_text(
+                            "SELECT ticker, yes_ask, no_ask, "
+                            "(yes_ask + no_ask) AS sum_cost, "
+                            "net_edge_cents, detected_at::text "
+                            "FROM live_arbs_cloud "
+                            "WHERE strategy_type = 'yes_no_complement' "
+                            "AND yes_ask IS NOT NULL AND no_ask IS NOT NULL "
+                            "ORDER BY detected_at DESC LIMIT 15"
+                        )).fetchall()
+                    if _rel_ync_rows:
+                        import pandas as _pd_rel_ync
+                        _rel_ync_df = _pd_rel_ync.DataFrame(
+                            _rel_ync_rows,
+                            columns=["TICKER", "YES ASK", "NO ASK", "SUM COST", "NET EDGE (¢)", "DETECTED AT"],
+                        )
+                        for _col in ["YES ASK", "NO ASK", "SUM COST"]:
+                            _rel_ync_df[_col] = _rel_ync_df[_col].apply(
+                                lambda v: f"{float(v):.4f}" if v is not None else "--"
+                            )
+                        _rel_ync_df["NET EDGE (¢)"] = _rel_ync_df["NET EDGE (¢)"].apply(
+                            lambda v: f"{float(v):.2f}" if v is not None else "--"
+                        )
+                        import time as _ync_time
+                        _now_ync = _ync_time.time()
+                        def _ync_age(s):
+                            try:
+                                _t = _pd_rel_ync.to_datetime(s, utc=True).timestamp()
+                                _sec = _now_ync - _t
+                                if _sec < 3600: return f"{int(_sec//60)}m ago"
+                                if _sec < 86400: return f"{int(_sec//3600)}h ago"
+                                return f"{int(_sec//86400)}d ago"
+                            except Exception:
+                                return str(s)[:10] if s else "--"
+                        _rel_ync_df["AGE"] = _rel_ync_df["DETECTED AT"].apply(_ync_age)
+                        _rel_ync_df = _rel_ync_df.drop(columns=["DETECTED AT"])
+                        st.markdown(
+                            f"<div style='font-size:0.58rem;letter-spacing:0.08em;text-transform:uppercase;"
+                            f"color:{GREEN};margin-bottom:0.3rem;'>● NEON — RECENT YNC RECORDS (historical — YNC not executable)</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.dataframe(_rel_ync_df, use_container_width=True, hide_index=True)
+                        st.caption(f"{len(_rel_ync_rows)} most recent YNC records from Neon · feed/rounding artifacts only · live YES+NO always ≥100¢")
+                        _ync_shown_rel = True
+            except Exception:
+                pass
+            if not _ync_shown_rel:
+                _no_data_panel("No live quotes yet — scanner connects automatically when dashboard is running.")
     except Exception as _e_rel:
-        _no_data_panel(f"Live state unavailable ({type(_e_rel).__name__}). Start the dashboard WebSocket feed.")
+        _no_data_panel(f"Live state unavailable ({type(_e_rel).__name__}).")
 
 
 def _render_strategy_performance(summary: dict, hist_stats: dict):
     st.markdown("#### STRATEGY PERFORMANCE SUMMARY")
     _badge("PRELIMINARY", AMBER)
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {AMBER};
-padding:0.65rem 1rem;border-radius:3px;margin-bottom:0.75rem;font-size:0.72rem;
-color:{TEXT2};line-height:1.6;'>
-<b style='color:{AMBER};letter-spacing:0.06em;'>DATA SOURCE: HISTORICAL REFERENCE DB</b><br>
-All figures below are <b>historical</b> — computed from the reference SQLite snapshot
-(opportunities detected during a prior ingestion run, not a live session).
-Live session stats (current WebSocket feed) appear in the DATA COVERAGE tab.
-No real capital was deployed. All edge values represent simulated outcomes
-under idealized assumptions (immediate execution at stated price, no queue).
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption("Historical arbs from Neon cloud · anti-ghost filter applied · simulated outcomes, no real capital")
 
     # --- Percentile table from new data_layer function -----
     pct_df, _ = get_arb_edge_by_strategy_class()
@@ -428,7 +437,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
             if col in display_pct.columns:
                 def _fmt_c(v):
                     try:
-                        return f"{float(v):.2f}c"
+                        return f"{float(v):.2f}¢"
                     except (TypeError, ValueError):
                         return "--"
                 display_pct[col] = display_pct[col].apply(_fmt_c)
@@ -462,9 +471,10 @@ under idealized assumptions (immediate execution at stated price, no queue).
                     _strat_date = str(_spr[0])[:10]
         except Exception:
             pass
-        st.caption(
-            f"n={len(pct_df):,} rows · Historical data from {_strat_date}. High P95 edge values may reflect brief sub-second opportunities."
-        )
+        _class_col_vals = display_pct.get("CLASS", display_pct.get("classification", pd.Series())).astype(str).unique().tolist() if not display_pct.empty else []
+        _is_neon_only = _class_col_vals == ["NEON"] or set(_class_col_vals) == {"NEON"}
+        _src_note = "Neon cloud live_arbs_cloud (no A/B/C/D classification — CLASS=NEON)" if _is_neon_only else f"Historical data from {_strat_date}"
+        st.caption(f"N={len(pct_df):,} ROWS · {_src_note} · YNC not executable on Kalshi")
 
         # --- Strategy avg net edge bar chart -----
         if "strategy_type" in pct_df.columns and "median_edge_cents" in pct_df.columns:
@@ -489,15 +499,15 @@ under idealized assumptions (immediate execution at stated price, no queue).
                     marker_color=_bar_colors[:len(_avg_by_strat)],
                     marker_line_width=0,
                     text=pd.to_numeric(_avg_by_strat["avg_net_edge_cents"], errors="coerce").apply(
-                        lambda v: f"{v:.2f}c" if pd.notna(v) else ""
+                        lambda v: f"{v:.2f}¢" if pd.notna(v) else ""
                     ),
                     textposition="outside",
                 ))
                 _fig_strat.update_layout(**plotly_dark_layout(
-                    title={"text": "AVG NET EDGE BY STRATEGY (MEDIAN, CENTS)", "font": {"size": 10, "color": TEXT3}},
+                    title={"text": "AVG NET EDGE BY STRATEGY (MEDIAN, ¢)", "font": {"size": 10, "color": TEXT3}},
                     height=220,
-                    xaxis_title="Strategy",
-                    yaxis_title="Avg Net Edge (c)",
+                    xaxis_title="STRATEGY",
+                    yaxis_title="AVG NET EDGE (¢)",
                     margin={"l": 40, "r": 20, "t": 35, "b": 60},
                 ))
                 st.plotly_chart(_fig_strat, use_container_width=True)
@@ -508,17 +518,17 @@ under idealized assumptions (immediate execution at stated price, no queue).
             df = pd.DataFrame(arb_by_strategy)
             for col in ["avg_edge_cents", "max_edge_cents"]:
                 if col in df.columns:
-                    df[col] = df[col].apply(lambda v: f"{float(v):.2f}c")
+                    df[col] = df[col].apply(lambda v: f"{float(v):.2f}¢")
             st.dataframe(
                 df.rename(columns={
                     "strategy": "STRATEGY", "class": "CLASS",
-                    "count": "OPPORTUNITIES",
-                    "avg_edge_cents": "AVG EDGE", "max_edge_cents": "MAX EDGE",
+                    "count": "DETECTIONS",
+                    "avg_edge_cents": "AVG EDGE (¢)", "max_edge_cents": "MAX EDGE (¢)",
                 }),
                 use_container_width=True, height=250, hide_index=True,
             )
         else:
-            _no_data_panel("No strategy performance data available.")
+            _no_data_panel("NO STRATEGY PERFORMANCE DATA AVAILABLE.")
 
     # --- Detection trend: last 30 days from DB -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -536,6 +546,7 @@ under idealized assumptions (immediate execution at stated price, no queue).
                 "SELECT DATE(detected_at) AS day, COUNT(*) AS cnt "
                 "FROM arbitrage_opportunities "
                 "WHERE detected_at >= DATE('now', '-30 days') "
+                "AND strategy_type NOT IN ('yes_no_complement') "
                 "GROUP BY DATE(detected_at) ORDER BY day"
             ).fetchall()
             _c30.close()
@@ -546,26 +557,26 @@ under idealized assumptions (immediate execution at stated price, no queue).
             _fig30 = go.Figure()
             _fig30.add_trace(go.Bar(
                 x=_trend30_df["day"], y=_trend30_df["count"],
-                name="Daily Arbs", marker_color=CYAN, marker_line_width=0, opacity=0.65,
+                name="DAILY DETECTIONS", marker_color=CYAN, marker_line_width=0, opacity=0.65,
             ))
             _fig30.add_trace(go.Scatter(
                 x=_trend30_df["day"], y=_trend30_df["count"].rolling(7, min_periods=1).mean(),
-                name="7-Day Rolling", mode="lines",
+                name="7-DAY ROLLING", mode="lines",
                 line={"color": AMBER, "width": 1.8},
             ))
             _fig30.update_layout(**plotly_dark_layout(
-                title={"text": "ARB DETECTIONS PER DAY — LAST 30 DAYS", "font": {"size": 10, "color": TEXT3}},
+                title={"text": "DETECTIONS PER DAY — LAST 30 DAYS", "font": {"size": 10, "color": TEXT3}},
                 height=240, xaxis_title="",
-                yaxis={"title": "Count"},
+                yaxis={"title": "COUNT"},
                 legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                 margin={"l": 45, "r": 20, "t": 35, "b": 30},
             ))
             st.plotly_chart(_fig30, use_container_width=True)
-            st.caption(f"Real DB data — {_trend30_df['count'].sum():,} arbs over last 30 days.")
+            st.caption(f"REAL DB DATA — {_trend30_df['count'].sum():,} ARB DETECTIONS OVER LAST 30 DAYS")
         else:
-            st.info("No detection data in the last 30 days.")
+            st.caption("NO DETECTION DATA IN THE LAST 30 DAYS")
     except Exception:
-        st.info("Detection trend unavailable — database not connected.")
+        st.caption("DETECTION TREND UNAVAILABLE")
 
     # --- Rolling trend chart -----
     rolling_df, _ = get_arb_rolling_7d()
@@ -575,27 +586,27 @@ under idealized assumptions (immediate execution at stated price, no queue).
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=rolling_df["day"], y=rolling_df["count"],
-            name="Daily Opps", marker_color=BLUE, marker_line_width=0, opacity=0.5,
+            name="DAILY DETECTIONS", marker_color=BLUE, marker_line_width=0, opacity=0.5,
         ))
         if "rolling_7d_count" in rolling_df.columns:
             fig.add_trace(go.Scatter(
                 x=rolling_df["day"], y=rolling_df["rolling_7d_count"],
-                name="7-Day Rolling", mode="lines",
+                name="7-DAY ROLLING", mode="lines",
                 line={"color": AMBER, "width": 1.8},
             ))
         if "avg_edge_cents" in rolling_df.columns:
             fig.add_trace(go.Scatter(
                 x=rolling_df["day"], y=rolling_df["avg_edge_cents"],
-                name="Avg Edge (c)", mode="lines",
+                name="AVG EDGE (¢)", mode="lines",
                 line={"color": GREEN, "width": 1.5},
                 yaxis="y2",
             ))
         fig.update_layout(
             **plotly_dark_layout(
-            title={"text": "OPPORTUNITY FREQUENCY & EDGE TREND", "font": {"size": 10, "color": TEXT3}},
+            title={"text": "DETECTION FREQUENCY & EDGE TREND", "font": {"size": 10, "color": TEXT3}},
             height=280, xaxis_title="",
-            yaxis={"title": "Count"},
-            yaxis2={"title": "Avg Edge (c)", "overlaying": "y", "side": "right",
+            yaxis={"title": "COUNT"},
+            yaxis2={"title": "AVG EDGE (¢)", "overlaying": "y", "side": "right",
                     "gridcolor": "rgba(0,0,0,0)"},
             legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
         ))
@@ -604,17 +615,19 @@ under idealized assumptions (immediate execution at stated price, no queue).
     # Strategy descriptions  (matches strategy_type values in arbitrage_opportunities table)
     st.markdown("<br>", unsafe_allow_html=True)
     for strat, desc in [
-        ("mutually_exclusive",      "Exactly one outcome can settle YES. Arb condition: &#931; NO_asks &lt; N&#8722;1 — the cost to buy all N NO contracts is less than the guaranteed N&#8722;1 payout (exactly one NO resolves to &#36;0; all others pay &#36;1)."),
-        ("superset",               "Superset contract outcome strictly includes subset. Must be priced &ge; subset; violations are arb."),
-        ("threshold_order",        "Ordered threshold contracts enforce price monotonicity. Violations create risk-free spread trades."),
-        ("collectively_exhaustive", "Exactly one outcome must occur. Sum of YES asks &lt; 100&#162; means all outcomes are underpriced — buying all YES contracts costs less than the guaranteed &#36;1 payout."),
+        ("mutually_exclusive",      "Exactly one outcome can settle YES · arb condition: &#931; NO_asks &lt; N&#8722;1 (cost to buy all N NO contracts &lt; guaranteed N&#8722;1 payout)"),
+        ("superset",               "Superset contract outcome strictly includes subset · must be priced &ge; subset — violations are arb"),
+        ("threshold_order",        "Ordered threshold contracts enforce price monotonicity · violations create risk-free spread trades"),
+        ("collectively_exhaustive", "Exactly one outcome must occur · sum of YES asks &lt; 100&#162; means all outcomes underpriced — buying all YES costs less than guaranteed &#36;1 payout"),
     ]:
         _badge("INFERRED", BLUE)
-        st.caption(f"**{strat.replace('_',' ').upper()}**: {desc}")
+        _p09_snames = {"mutually_exclusive": "ME — MUTUALLY EXCLUSIVE", "threshold_order": "TH — THRESHOLD ORDER", "yes_no_complement": "YNC — YES/NO COMPLEMENT", "collectively_exhaustive": "CE — COLLECTIVELY EXHAUSTIVE", "superset": "SS — SUPERSET"}
+        st.caption(f"**{_p09_snames.get(str(strat).lower(), str(strat).upper())}**: {desc}")
 
 
 def _render_arb_findings(hist_stats: dict, summary: dict):
-    st.markdown("#### ARBITRAGE DETECTION FINDINGS")
+    st.markdown("#### DETECTION FINDINGS")
+    _asts_af = get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0)
 
     # --- Validation methodology note -----
     st.markdown(
@@ -625,11 +638,11 @@ text-transform:uppercase;margin-bottom:4px;'>VALIDATION METHODOLOGY</div>
 <div style='font-size:0.72rem;color:{TEXT2};line-height:1.6;'>
 Every detected opportunity passes a multi-gate validation pipeline before being classified as real:
 (1) gross edge &gt; 0 after summing leg costs, (2) fee-adjusted net edge &gt; threshold,
-(3) stale-book guard (quote age &lt; 60s for CE legs), (4) sports-market filter (excluded categories),
+(3) stale-book guard (quote age &lt; 60s for all legs), (4) sports-market filter (excluded categories),
 (5) L2 depth walk (executable quantity &gt; 0 at stated price levels),
 (6) deduplication (same event suppressed for 5 min — Gate 5 TTL), and
 (7) high-edge sanity check (net &gt; 50¢ flagged as pre-fix suspect).
-CE arbs additionally pass all 12 gates of the CE scanner (documented in the Methodology tab).
+CE/ME/TH arbs pass all validation gates before being persisted. YNC is not executable on Kalshi — YES+NO always sum ≥ $1.00 on Kalshi (feed artifacts, not executable); historical YNC records in DB are pre-fix legacy data only.
 </div>
 </div>""",
         unsafe_allow_html=True,
@@ -661,7 +674,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
     )
     _kf_html = (
         "<div style='display:grid;grid-template-columns:repeat(5,1fr);gap:0.5rem;margin-bottom:1rem;'>"
-        + _kf("PRICING VIOLATIONS", f"{_total_opps:,}", AMBER, "gross edge > 0")
+        + _kf("DETECTIONS (GROSS>0)", f"{_total_opps:,}", AMBER, "all executable strategies; YNC not executable")
         + _kf("SURVIVED FEE FILTER", f"{_fee_survived:,}", BLUE, "net edge > fee")
         + _kf("L2 CONFIRMED (CLASS A)", f"{_l2_confirmed:,}", GREEN, "executable qty > 0")
         + _kf("MEDIAN NET EDGE", f"{_median_edge:.2f}¢", CYAN, "after Kalshi fee")
@@ -669,6 +682,78 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         + "</div>"
     )
     st.markdown(_kf_html, unsafe_allow_html=True)
+
+    # --- Neon cloud supplementary panel (shown when analytics DB is empty) -----
+    _neon_n_all = int(_asts_af.get("n_all") or 0)
+    _neon_source = _asts_af.get("source", "")
+    if _neon_source == "neon_cloud" and _neon_n_all > 0:
+        # Fetch median/max edge from Neon for the research panel
+        _p09_med_edge = 0.0
+        _p09_max_edge = 0.0
+        _p09_strat_counts: dict = {}
+        try:
+            import dashboard.live_arb_store as _las_p09af
+            from sqlalchemy import text as _p09af_text
+            _p09af_eng = getattr(_las_p09af, "_pg_engine", None) or _las_p09af.get_pg_engine_cached()
+            if _p09af_eng is not None:
+                with _p09af_eng.connect() as _p09af_c:
+                    _p09af_r = _p09af_c.execute(_p09af_text(
+                        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY net_edge_cents), "
+                        "MAX(net_edge_cents) FROM live_arbs_cloud "
+                        "WHERE net_edge_cents > 0 AND strategy_type NOT IN "
+                        "('yes_no_complement')"
+                    )).fetchone()
+                    _p09af_sc = _p09af_c.execute(_p09af_text(
+                        "SELECT strategy_type, COUNT(*) FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "GROUP BY strategy_type ORDER BY COUNT(*) DESC"
+                    )).fetchall()
+                if _p09af_r and _p09af_r[0]:
+                    _p09_med_edge = float(_p09af_r[0] or 0)
+                    _p09_max_edge = float(_p09af_r[1] or 0)
+                for _sc_r in (_p09af_sc or []):
+                    _p09_strat_counts[str(_sc_r[0])] = int(_sc_r[1])
+        except Exception:
+            pass
+        _neon_n_1h = int(_asts_af.get("n_1h") or 0)
+        _neon_n_24h = int(_asts_af.get("n_24h") or 0)
+        _neon_last = _asts_af.get("last_ts") or "--"
+        st.markdown(
+            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+            f"color:{GREEN};margin:0.5rem 0 0.3rem;'>● NEON CLOUD DETECTION STATS</div>",
+            unsafe_allow_html=True,
+        )
+        _nc1, _nc2, _nc3, _nc4, _nc5 = st.columns(5)
+        _nc1.metric("NEON TOTAL", f"{_neon_n_all:,}", help="Arbs logged to Neon cloud")
+        _nc2.metric("LAST 24h", f"{_neon_n_24h:,}")
+        _nc3.metric("LAST 1h", f"{_neon_n_1h:,}")
+        _nc4.metric("MEDIAN EDGE", f"{_p09_med_edge:.2f}¢" if _p09_med_edge else "--")
+        _nc5.metric("PEAK EDGE", f"{_p09_max_edge:.2f}¢" if _p09_max_edge else "--")
+        # Human-readable age for last detection
+        _p09_last_age = "--"
+        if _neon_last and _neon_last != "--":
+            try:
+                import time as _p09_last_time
+                import pandas as _pd_p09_last
+                _p09_last_t = _pd_p09_last.to_datetime(_neon_last, utc=True).timestamp()
+                _p09_last_s = _p09_last_time.time() - _p09_last_t
+                if _p09_last_s < 3600:
+                    _p09_last_age = f"{int(_p09_last_s // 60)}m ago"
+                elif _p09_last_s < 86400:
+                    _p09_last_age = f"{int(_p09_last_s // 3600)}h ago"
+                else:
+                    _p09_last_age = f"{int(_p09_last_s // 86400)}d ago"
+            except Exception:
+                _p09_last_age = str(_neon_last)[:16]
+        if _p09_strat_counts:
+            _STRAT_SH_P09 = {
+                "mutually_exclusive": "ME", "threshold_order": "TH",
+                "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS",
+            }
+            _sc_parts = [f"{_STRAT_SH_P09.get(k, k.upper()[:4])}: {v:,}" for k, v in _p09_strat_counts.items()]
+            st.caption(f"Last detection: {_p09_last_age} · " + " · ".join(_sc_parts))
+        else:
+            st.caption(f"Last detection: {_p09_last_age} · source: Neon live_arbs_cloud")
 
     # --- Violation Rate metric -----
     _viol_rate_num = _total_opps
@@ -684,7 +769,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
     )
 
     # --- Ghost Arb Violations Log expander -----
-    with st.expander("🚫 Ghost Arb Violations Log", expanded=False):
+    with st.expander("GHOST ARB VIOLATIONS LOG", expanded=False):
         st.markdown(
             f"<div style='font-size:0.6rem;letter-spacing:0.08em;color:{AMBER};"
             f"text-transform:uppercase;margin-bottom:0.4rem;'>MOST RECENT STRUCTURAL VIOLATIONS</div>",
@@ -712,10 +797,10 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                         except Exception:
                             _ts_et = str(_ts_raw)[:19]
                         _viol_rows.append({
-                            "Timestamp (ET)": _ts_et,
-                            "Pattern code": _v.get("pattern") or _v.get("pattern_code") or "--",
-                            "Markets involved": _v.get("markets") or _v.get("tickers") or "--",
-                            "Why blocked": _v.get("reason") or _v.get("why") or "--",
+                            "TIMESTAMP (ET)": _ts_et,
+                            "PATTERN CODE": _v.get("pattern") or _v.get("pattern_code") or "--",
+                            "MARKETS INVOLVED": _v.get("markets") or _v.get("tickers") or "--",
+                            "WHY BLOCKED": _v.get("reason") or _v.get("why") or "--",
                         })
                 if _viol_rows:
                     _viol_df = _pd_viol.DataFrame(_viol_rows)
@@ -733,10 +818,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 _sess_viol_count = int(_ss2.get("violations", 0) or 0)
             except Exception:
                 pass
-            st.info(
-                f"Violation log only available during live WS session — "
-                f"{_sess_viol_count} violation(s) caught this session."
-            )
+            st.caption(f"{_sess_viol_count} violation(s) this session (live WS only)")
 
         # --- Pattern Breakdown table -----
         st.markdown("<br>", unsafe_allow_html=True)
@@ -758,7 +840,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                     _pb_conn.close()
                     if _pb_rows:
                         import pandas as _pd_pb
-                        _pb_df = _pd_pb.DataFrame(_pb_rows, columns=["Pattern", "Violations Caught"])
+                        _pb_df = _pd_pb.DataFrame(_pb_rows, columns=["PATTERN", "VIOLATIONS CAUGHT"])
                         st.dataframe(_pb_df, use_container_width=True, height=min(500, 45 * len(_pb_df) + 45), hide_index=True)
                         _pattern_data_shown = True
                 except Exception:
@@ -769,7 +851,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         except Exception:
             pass
         if not _pattern_data_shown:
-            st.info("Pattern-level breakdown requires ws_predict_pattern_log table — enable pattern frequency logging to populate.")
+            st.caption("PATTERN BREAKDOWN UNAVAILABLE")
 
     # --- Edge distribution histogram -----
     try:
@@ -781,7 +863,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         if _edh_conn:
             _edh_rows = _edh_conn.execute(
                 "SELECT net_edge_cents, gross_edge_cents, classification FROM arbitrage_opportunities "
-                "WHERE net_edge_cents IS NOT NULL"
+                "WHERE net_edge_cents IS NOT NULL AND strategy_type != 'yes_no_complement' "
+                "AND strategy_type NOT IN ('yes_no_complement')"
             ).fetchall()
             _edh_conn.close()
             _edge_vals  = [float(r[0]) for r in _edh_rows if r[0] is not None]
@@ -800,13 +883,13 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
             _fig_edh = go.Figure()
             if _neg_vals:
                 _fig_edh.add_trace(go.Histogram(
-                    x=_neg_vals, name="Negative edge",
+                    x=_neg_vals, name="NEGATIVE EDGE",
                     marker_color=RED, marker_line_width=0, opacity=0.75,
                     xbins=dict(size=0.5),
                 ))
             if _pos_vals:
                 _fig_edh.add_trace(go.Histogram(
-                    x=_pos_vals, name="Positive edge",
+                    x=_pos_vals, name="POSITIVE EDGE",
                     marker_color=GREEN, marker_line_width=0, opacity=0.75,
                     xbins=dict(size=0.5),
                 ))
@@ -818,14 +901,14 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 x=[None], y=[None],
                 mode="lines",
                 line=dict(color=RED, width=1.5, dash="dash"),
-                name="min edge threshold (2¢)",
+                name="MIN EDGE THRESHOLD (2¢)",
                 showlegend=True,
             ))
             _fig_edh.update_layout(**plotly_dark_layout(
-                title={"text": "NET EDGE DISTRIBUTION (ALL ARB OPPORTUNITIES)", "font": {"size": 10, "color": TEXT3}},
+                title={"text": "NET EDGE DISTRIBUTION", "font": {"size": 10, "color": TEXT3}},
                 height=200,
-                xaxis_title="Net edge (¢)",
-                yaxis_title="Arb count",
+                xaxis_title="NET EDGE (¢)",
+                yaxis_title="ARB COUNT",
                 barmode="overlay",
                 legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                 margin={"l": 45, "r": 20, "t": 35, "b": 40},
@@ -867,18 +950,18 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                             y=[_edge_vals[i] for i in _ix],
                             mode="markers",
                             marker=dict(color=_cls_color, size=8, opacity=0.65, line=dict(width=0)),
-                            name=f"Class {_cls_label}",
+                            name=f"CLASS {_cls_label}",
                         ))
                     _fig_scatter.update_layout(**plotly_dark_layout(
                         title={"text": "Gross vs Net Edge · colored by classification", "font": {"size": 10, "color": TEXT3}},
                         height=250,
-                        xaxis_title="Gross edge (¢)",
-                        yaxis_title="Net edge (¢)",
+                        xaxis_title="GROSS EDGE (¢)",
+                        yaxis_title="NET EDGE (¢)",
                         legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                         margin={"l": 50, "r": 20, "t": 35, "b": 40},
                     ))
                     st.plotly_chart(_fig_scatter, use_container_width=True)
-                    st.caption("Points below the diagonal paid fees that reduced edge")
+                    st.caption("POINTS BELOW THE DIAGONAL PAID FEES THAT REDUCED EDGE")
             except Exception:
                 pass
 
@@ -890,7 +973,10 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                     if _freq_conn:
                         _freq_rows = _freq_conn.execute(
                             "SELECT detected_at FROM arbitrage_opportunities "
-                            "WHERE detected_at IS NOT NULL ORDER BY detected_at"
+                            "WHERE detected_at IS NOT NULL "
+                            "AND strategy_type != 'yes_no_complement' "
+                            "AND strategy_type NOT IN ('yes_no_complement') "
+                            "ORDER BY detected_at"
                         ).fetchall()
                         _freq_conn.close()
                         if _freq_rows and len(_freq_rows) >= 5:
@@ -925,7 +1011,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                             _fa1, _fa2, _fa3 = st.columns(3)
                             with _fa1:
                                 st.metric("MEDIAN TIME BETWEEN ARBS", _gap_label,
-                                          help="Median gap between consecutive arbs (real DB timestamps)")
+                                          help="MEDIAN GAP BETWEEN CONSECUTIVE ARBS")
                             with _fa2:
                                 st.metric("PEAK HOUR (ET)", _peak_label)
                             with _fa3:
@@ -940,7 +1026,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 else:
                                     _next_arb_label = "--"
                                 st.metric("NEXT ARB (AVG GAP)", _next_arb_label,
-                                          help="Expected time to next arb based on average inter-arb gap from historical data")
+                                          help="EXPECTED TIME TO NEXT ARB")
 
                             # --- Arb velocity: arbs per hour over last 24h -----
                             try:
@@ -955,7 +1041,9 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                     _vel_conn = _gsc_vel()
                                     if _vel_conn:
                                         _vel_row = _vel_conn.execute(
-                                            "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ?",
+                                            "SELECT COUNT(*) FROM arbitrage_opportunities "
+                                            "WHERE detected_at >= ? AND strategy_type != 'yes_no_complement' "
+                                            "AND strategy_type NOT IN ('yes_no_complement')",
                                             (_cutoff_vel,),
                                         ).fetchone()
                                         _vel_conn.close()
@@ -966,7 +1054,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 if _vel_count is not None:
                                     _arb_velocity = round(_vel_count / 24.0, 2)
                                     st.metric("ARB VELOCITY (24H)", f"{_arb_velocity:.2f} arbs/hr",
-                                              help=f"Total arbs in last 24h ({_vel_count:,}) divided by 24 hours")
+                                              help=f"Arb detections in last 24h ({_vel_count:,}) divided by 24 hours")
                             except Exception:
                                 pass
 
@@ -988,14 +1076,14 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                     **plotly_dark_layout(
                                         title={"text": "ARB COUNT BY DAY OF WEEK (ET)", "font": {"size": 10, "color": TEXT3}},
                                         height=220,
-                                        xaxis_title="Day",
-                                        yaxis_title="Arb Count",
+                                        xaxis_title="DAY",
+                                        yaxis_title="ARB COUNT",
                                         margin={"l": 40, "r": 20, "t": 35, "b": 40},
                                     )
                                 )
                                 st.plotly_chart(_fig_dow, use_container_width=True)
                                 _busiest_dow = _dow_labels[int(_dow_counts_raw.idxmax())]
-                                st.caption(f"Busiest day: {_busiest_dow} ({max(_dow_vals):,} arbs). Highlighted bar = most frequent.")
+                                st.caption(f"Busiest day: {_busiest_dow} ({max(_dow_vals):,} arbs) · highlighted = most frequent")
                             except Exception:
                                 pass
 
@@ -1016,21 +1104,17 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 ))
                                 _fig_hod.update_layout(
                                     **plotly_dark_layout(
-                                        title={"text": "ARBS DETECTED BY HOUR OF DAY (ET)", "font": {"size": 10, "color": TEXT3}},
+                                        title={"text": "ARBS BY HOUR OF DAY (ET)", "font": {"size": 10, "color": TEXT3}},
                                         height=240,
-                                        xaxis_title="Hour (ET)",
-                                        yaxis_title="Arb Count",
+                                        xaxis_title="HOUR (ET)",
+                                        yaxis_title="ARB COUNT",
                                         margin={"l": 40, "r": 20, "t": 35, "b": 50},
                                     )
                                 )
                                 st.plotly_chart(_fig_hod, use_container_width=True)
                                 _busiest_hod = f"{_hod_labels[_hod_vals.index(_hod_max)]} ET"
                                 _quietest_nonzero = min((v for v in _hod_vals if v > 0), default=0)
-                                st.caption(
-                                    f"Peak hour: {_busiest_hod} ({_hod_max:,} arbs). "
-                                    "Low-activity hours may indicate when market makers are least attentive. "
-                                    "Highlighted bar = most frequent."
-                                )
+                                st.caption(f"Peak hour: {_busiest_hod} ({_hod_max:,} arbs) · highlighted = most frequent")
                             except Exception:
                                 pass
 
@@ -1041,7 +1125,9 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                 if _sf_conn:
                                     _sf_rows = _sf_conn.execute(
                                         "SELECT strategy_type, COUNT(*) as cnt FROM arbitrage_opportunities "
-                                        "WHERE strategy_type IS NOT NULL GROUP BY strategy_type ORDER BY cnt DESC"
+                                        "WHERE strategy_type IS NOT NULL "
+                                        "AND strategy_type NOT IN ('yes_no_complement') "
+                                        "GROUP BY strategy_type ORDER BY cnt DESC"
                                     ).fetchall()
                                     _sf_conn.close()
                                     if _sf_rows:
@@ -1074,11 +1160,11 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                         ))
                                         _fig_sf.update_layout(
                                             **plotly_dark_layout(
-                                                title={"text": "STRATEGY FREQUENCY BREAKDOWN (% of all arbs)",
+                                                title={"text": "STRATEGY DETECTION FREQUENCY",
                                                        "font": {"size": 10, "color": TEXT3}},
                                                 height=220,
-                                                xaxis_title="Strategy",
-                                                yaxis_title="Arb Count",
+                                                xaxis_title="STRATEGY",
+                                                yaxis_title="DETECTION COUNT",
                                                 margin={"l": 40, "r": 20, "t": 35, "b": 40},
                                             )
                                         )
@@ -1087,10 +1173,86 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                                             "  |  ".join(
                                                 f"{row['label']}: {row['count']:,} ({row['pct']:.1f}%)"
                                                 for _, row in _sf_df.iterrows()
-                                            )
+                                            ) + "  ·  YNC detections are feed artifacts (not executable)"
                                         )
                             except Exception:
                                 pass
+            except Exception:
+                pass
+
+            # --- ARB FREQUENCY ANALYSIS — NEON FALLBACK (when no local SQLite data) ---
+            try:
+                if len(_edge_vals) < 5:  # only run when local data was absent/thin
+                    import dashboard.live_arb_store as _las_p09_freq
+                    from sqlalchemy import text as _p09_freq_text
+                    _p09_freq_eng = (
+                        getattr(_las_p09_freq, "_pg_engine", None)
+                        or _las_p09_freq.get_pg_engine_cached()
+                    )
+                    if _p09_freq_eng is not None:
+                        with _p09_freq_eng.connect() as _p09_fc:
+                            _p09_freq_rows = _p09_fc.execute(_p09_freq_text(
+                                "SELECT detected_at AT TIME ZONE 'America/New_York' AS det_et, "
+                                "strategy_type "
+                                "FROM live_arbs_cloud "
+                                "WHERE detected_at IS NOT NULL "
+                                "AND strategy_type NOT IN ('yes_no_complement') "
+                                "AND net_edge_cents > 0 "
+                                "ORDER BY detected_at"
+                            )).fetchall()
+                        if _p09_freq_rows and len(_p09_freq_rows) >= 5:
+                            import pandas as _pd_p09_freq
+                            _p09_freq_dts = _pd_p09_freq.to_datetime(
+                                [r[0] for r in _p09_freq_rows], utc=False, errors="coerce"
+                            ).dropna()
+                            # Hour-of-day chart from Neon
+                            _p09_hod_counts = _p09_freq_dts.dt.hour.value_counts().reindex(range(24), fill_value=0)
+                            _p09_hod_vals = [int(_p09_hod_counts.get(h, 0)) for h in range(24)]
+                            _p09_hod_labels = [f"{h:02d}:00" for h in range(24)]
+                            _p09_hod_max = max(_p09_hod_vals) if _p09_hod_vals else 1
+                            _p09_fig_hod = go.Figure(go.Bar(
+                                x=_p09_hod_labels,
+                                y=_p09_hod_vals,
+                                marker_color=[GREEN if v == _p09_hod_max else BLUE for v in _p09_hod_vals],
+                                marker_line_width=0,
+                                text=[str(v) if v > 0 else "" for v in _p09_hod_vals],
+                                textposition="outside",
+                            ))
+                            _p09_fig_hod.update_layout(
+                                **plotly_dark_layout(
+                                    title={"text": "ARBS BY HOUR OF DAY (ET) — NEON CLOUD", "font": {"size": 10, "color": TEXT3}},
+                                    height=240,
+                                    xaxis_title="HOUR (ET)",
+                                    yaxis_title="ARB COUNT",
+                                    margin={"l": 40, "r": 20, "t": 35, "b": 50},
+                                )
+                            )
+                            st.plotly_chart(_p09_fig_hod, use_container_width=True)
+                            _p09_busiest = f"{_p09_hod_labels[_p09_hod_vals.index(_p09_hod_max)]} ET"
+                            # Day-of-week chart from Neon
+                            _DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                            _p09_dow_counts = _p09_freq_dts.dt.dayofweek.value_counts().reindex(range(7), fill_value=0)
+                            _p09_dow_vals = [int(_p09_dow_counts.get(d, 0)) for d in range(7)]
+                            _p09_dow_max = max(_p09_dow_vals) if _p09_dow_vals else 1
+                            _p09_fig_dow = go.Figure(go.Bar(
+                                x=_DOW_LABELS,
+                                y=_p09_dow_vals,
+                                marker_color=[GREEN if v == _p09_dow_max else BLUE for v in _p09_dow_vals],
+                                marker_line_width=0,
+                                text=[str(v) if v > 0 else "" for v in _p09_dow_vals],
+                                textposition="outside",
+                            ))
+                            _p09_fig_dow.update_layout(
+                                **plotly_dark_layout(
+                                    title={"text": "ARBS BY DAY OF WEEK (ET) — NEON CLOUD", "font": {"size": 10, "color": TEXT3}},
+                                    height=220,
+                                    xaxis_title="DAY",
+                                    yaxis_title="ARB COUNT",
+                                    margin={"l": 40, "r": 20, "t": 35, "b": 40},
+                                )
+                            )
+                            st.plotly_chart(_p09_fig_dow, use_container_width=True)
+                            st.caption(f"Neon cloud: {len(_p09_freq_rows):,} arbs · peak hour: {_p09_busiest} ({_p09_hod_max:,}) · ET")
             except Exception:
                 pass
 
@@ -1101,7 +1263,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 if _eds_conn:
                     _eds_rows = _eds_conn.execute(
                         "SELECT strategy_type, net_edge_cents FROM arbitrage_opportunities "
-                        "WHERE strategy_type IS NOT NULL AND net_edge_cents IS NOT NULL"
+                        "WHERE strategy_type IS NOT NULL AND net_edge_cents IS NOT NULL "
+                        "AND strategy_type NOT IN ('yes_no_complement')"
                     ).fetchall()
                     _eds_conn.close()
                     if _eds_rows:
@@ -1146,17 +1309,17 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                             _fig_eds.update_layout(**plotly_dark_layout(
                                 title={"text": "MEDIAN NET EDGE BY STRATEGY", "font": {"size": 10, "color": TEXT3}},
                                 height=200,
-                                xaxis_title="Strategy",
-                                yaxis_title="Median Net Edge (¢)",
+                                xaxis_title="STRATEGY",
+                                yaxis_title="MEDIAN NET EDGE (¢)",
                                 margin={"l": 45, "r": 20, "t": 35, "b": 60},
                             ))
                             st.plotly_chart(_fig_eds, use_container_width=True)
             except Exception:
                 pass
         else:
-            st.info("Edge distribution: no net_edge_cents data available yet.")
+            st.caption("NO EDGE DISTRIBUTION DATA YET")
     except Exception:
-        st.info("Edge distribution unavailable — database not connected.")
+        st.caption("EDGE DISTRIBUTION UNAVAILABLE")
 
     # --- Fee impact analysis -----
     try:
@@ -1174,11 +1337,11 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
             _badge("OBSERVED", GREEN)
             _fc1, _fc2, _fc3 = st.columns(3)
             with _fc1:
-                st.metric("Gross edge found", f"{_total_gross:.1f}¢", help="Sum of gross_edge_cents across all detected arbs")
+                st.metric("GROSS EDGE FOUND", f"{_total_gross:.1f}¢", help="SUM OF GROSS_EDGE_CENTS ACROSS ARBS (YNC NOT EXECUTABLE ON KALSHI)")
             with _fc2:
-                st.metric("Fees paid", f"{_total_fees:.1f}¢", help="gross_edge_cents − net_edge_cents")
+                st.metric("FEES PAID", f"{_total_fees:.1f}¢", help="gross_edge_cents − net_edge_cents (arbs excluding YNC (not executable on Kalshi))")
             with _fc3:
-                st.metric("Net retained", f"{_total_net:.1f}¢ ({_pct_retained:.1f}% of gross)", help="Sum of net_edge_cents after Kalshi taker fee")
+                st.metric("NET RETAINED", f"{_total_net:.1f}¢ ({_pct_retained:.1f}% of gross)", help="Sum of net_edge_cents after Kalshi taker fee (arbs from CE/ME/TH strategies; YNC not executable)")
         elif not _edge_vals:
             pass  # already handled above
     except Exception:
@@ -1192,58 +1355,21 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         unsafe_allow_html=True,
     )
     _badge("OBSERVED", GREEN)
-    _fim_avg_fee = None
-    _fim_avg_ret = None
-    _fim_zero_ct = None
-    # Try PostgreSQL arbs table first
-    try:
-        from database.repository import get_engine as _ge_fim
-        from sqlalchemy import text as _txt_fim
-        _eng_fim = _ge_fim()
-        with _eng_fim.connect() as _conn_fim:
-            _fim_row = _conn_fim.execute(_txt_fim(
-                "SELECT AVG(gross_edge_cents - net_edge_cents) AS avg_fee_paid, "
-                "AVG(net_edge_cents / NULLIF(gross_edge_cents, 0)) AS avg_retention, "
-                "COUNT(*) FILTER (WHERE net_edge_cents <= 0) AS zero_net_count "
-                "FROM arbs"
-            )).fetchone()
-        if _fim_row:
-            _fim_avg_fee = float(_fim_row[0]) if _fim_row[0] is not None else None
-            _fim_avg_ret = float(_fim_row[1]) if _fim_row[1] is not None else None
-            _fim_zero_ct = int(_fim_row[2]) if _fim_row[2] is not None else None
-    except Exception:
-        pass
-    # Fall back to SQLite arbitrage_opportunities table
-    if _fim_avg_fee is None:
-        try:
-            from dashboard.data_layer import _sqlite_conn as _gsc_fim
-            _fimc = _gsc_fim()
-            if _fimc:
-                _fim_row2 = _fimc.execute(
-                    "SELECT AVG(gross_edge_cents - net_edge_cents) AS avg_fee_paid, "
-                    "AVG(CAST(net_edge_cents AS REAL) / NULLIF(CAST(gross_edge_cents AS REAL), 0)) AS avg_retention, "
-                    "SUM(CASE WHEN net_edge_cents <= 0 THEN 1 ELSE 0 END) AS zero_net_count "
-                    "FROM arbitrage_opportunities"
-                ).fetchone()
-                _fimc.close()
-                if _fim_row2:
-                    _fim_avg_fee = float(_fim_row2[0]) if _fim_row2[0] is not None else None
-                    _fim_avg_ret = float(_fim_row2[1]) if _fim_row2[1] is not None else None
-                    _fim_zero_ct = int(_fim_row2[2]) if _fim_row2[2] is not None else None
-        except Exception:
-            pass
+    _fim_avg_fee = _asts_af.get("avg_fee_paid")    if _asts_af else None
+    _fim_avg_ret = _asts_af.get("avg_retention")   if _asts_af else None
+    _fim_zero_ct = _asts_af.get("zero_net_count")  if _asts_af else None
     _fim_c1, _fim_c2, _fim_c3 = st.columns(3)
     with _fim_c1:
-        st.metric("Avg Fee Per Arb", f"{_fim_avg_fee:.2f}¢" if _fim_avg_fee is not None else "—",
-                  help="AVG(gross_edge_cents - net_edge_cents)")
+        st.metric("AVG FEE / DETECTION", f"{_fim_avg_fee:.2f}¢" if _fim_avg_fee is not None else "—",
+                  help="AVG(gross_edge_cents - net_edge_cents) — all executable strategies; YNC not executable")
     with _fim_c2:
-        st.metric("Edge Retention %", f"{_fim_avg_ret*100:.1f}%" if _fim_avg_ret is not None else "—",
-                  help="AVG(net_edge_cents / gross_edge_cents)")
+        st.metric("EDGE RETENTION %", f"{_fim_avg_ret*100:.1f}%" if _fim_avg_ret is not None else "—",
+                  help="AVG(net_edge_cents / gross_edge_cents) — all executable strategies; YNC not executable")
     with _fim_c3:
-        st.metric("Zero-Net Arbs", f"{_fim_zero_ct:,}" if _fim_zero_ct is not None else "—",
-                  help="COUNT(*) WHERE net_edge_cents <= 0 (fees wiped the gross edge)")
+        st.metric("ZERO-NET DETECTIONS", f"{_fim_zero_ct:,}" if _fim_zero_ct is not None else "—",
+                  help="COUNT(*) WHERE net_edge_cents <= 0 (fees wiped gross edge) — all executable strategies; YNC not executable")
     if _fim_avg_ret is not None and _fim_avg_ret < 0.7:
-        st.warning("Fees consuming >30% of gross edge — fee drag is significant")
+        st.caption("Fees >30% of gross edge — high fee drag")
 
     # --- Fee impact table by strategy -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1264,6 +1390,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                 "COUNT(*) AS cnt "
                 "FROM arbitrage_opportunities "
                 "WHERE strategy_type IS NOT NULL AND gross_edge_cents IS NOT NULL "
+                "AND strategy_type NOT IN ('yes_no_complement') "
                 "GROUP BY strategy_type ORDER BY avg_net DESC"
             ).fetchall()
             _fi_strat_conn.close()
@@ -1292,27 +1419,21 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                     hide_index=True,
                 )
             else:
-                st.info("No per-strategy fee data yet.")
+                st.caption("NO PER-STRATEGY FEE DATA YET")
         else:
-            st.info("No DB connection for fee table.")
+            st.caption("FEE TABLE UNAVAILABLE")
     except Exception:
-        st.info("Fee impact by strategy unavailable.")
+        st.caption("FEE IMPACT BY STRATEGY UNAVAILABLE")
 
     # --- YNC Market Pair Correlation -----
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.3rem;'>MARKET PAIR CORRELATION (YNC ARBs)</div>",
+        f"color:{TEXT3};margin-bottom:0.3rem;'>MARKET PAIR CORRELATION (YES/NO SPREAD — STRUCTURAL)</div>",
         unsafe_allow_html=True,
     )
     _badge("OBSERVED", GREEN)
-    st.markdown(
-        f"<span style='font-size:0.7rem;color:{TEXT2};'>For YES/NO Complement arbs, "
-        "YES ask and NO ask should be strongly negatively correlated (≈−1.0) because "
-        "they must sum to ≈$1.00. Correlation significantly above −1.0 suggests "
-        "independent mispricing — a signal of market maker inattention.</span>",
-        unsafe_allow_html=True,
-    )
+    st.caption("YES/NO asks negatively correlated ≈−1.0 (must sum ≈100¢) · correlation above −1.0 = transient feed/rounding noise · not executable")
     try:
         from dashboard.data_layer import _sqlite_conn as _gsc_ync
         _ync_conn = _gsc_ync()
@@ -1336,19 +1457,19 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                     _yc1.metric(
                         "YES/NO ASK CORRELATION",
                         f"{_ync_corr:.4f}",
-                        help="Pearson correlation between YES ask and NO ask across all YNC arbs. "
-                             "Healthy market: ≈ −1.0. Deviation = potential mispricing.",
+                        help="PEARSON CORRELATION BETWEEN YES ASK AND NO ASK ACROSS ALL YNC FEED RECORDS. "
+                             "Healthy market: ≈ −1.0. Deviation = feed/rounding artifact or data anomaly (YNC is not executable — not a real mispricing signal).",
                     )
-                    _yc2.metric("YNC ARB RECORDS", f"{len(_ync_df):,}")
+                    _yc2.metric("YNC FEED RECORDS", f"{len(_ync_df):,}")
                     _sum_mean = float((_ync_df["yes_ask"] + _ync_df["no_ask"]).mean())
                     _yc3.metric("AVG YES+NO SUM", f"{_sum_mean:.4f}",
-                                help="Should be <1.00 for a profitable arb. Values well below 1.00 indicate larger mispricings.")
+                                help="Historical average · live YES+NO always ≥100¢ · sub-100¢ in DB are pre-fix feed artifacts")
                     if _ync_corr < -0.95:
-                        st.success(f"Correlation {_ync_corr:.4f} is near −1.0 — healthy market structure (prices move in lockstep).")
+                        st.caption(f"Correlation {_ync_corr:.4f} ≈ −1.0 · healthy market structure")
                     elif _ync_corr < -0.85:
-                        st.warning(f"Correlation {_ync_corr:.4f} deviates from −1.0 — moderate mispricing signal.")
+                        st.caption(f"Correlation {_ync_corr:.4f} deviates from −1.0 (feed artifact, not executable)")
                     else:
-                        st.error(f"Correlation {_ync_corr:.4f} significantly above −1.0 — strong mispricing or data anomaly.")
+                        st.caption(f"Correlation {_ync_corr:.4f} strongly deviates from −1.0 (feed artifact)")
                     # Scatter: YES ask vs NO ask
                     _fig_ync = go.Figure()
                     _fig_ync.add_trace(go.Scatter(
@@ -1356,7 +1477,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                         y=_ync_df["no_ask"].tolist(),
                         mode="markers",
                         marker=dict(color=BLUE, size=5, opacity=0.5, line=dict(width=0)),
-                        name="YNC arbs",
+                        name="YNC detections (feed artifacts)",
                     ))
                     _ync_x = [float(_ync_df["yes_ask"].min()), float(_ync_df["yes_ask"].max())]
                     _fig_ync.add_trace(go.Scatter(
@@ -1369,21 +1490,62 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
                         title={"text": f"YNC: YES ASK vs NO ASK  (r = {_ync_corr:.4f})",
                                "font": {"size": 10, "color": TEXT3}},
                         height=260,
-                        xaxis_title="YES ask",
-                        yaxis_title="NO ask",
+                        xaxis_title="YES ASK",
+                        yaxis_title="NO ASK",
                         legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
                         margin={"l": 50, "r": 20, "t": 35, "b": 40},
                     ))
                     st.plotly_chart(_fig_ync, use_container_width=True)
-                    st.caption("Green dashed line = YES + NO = 1.00. Points below the line are profitable complement arbs.")
+                    st.caption("Green dashed = YES+NO=1.00 · points below = historical feed artifacts")
                 else:
-                    st.info("Insufficient YNC arb records after cleaning — need at least 5.")
+                    st.caption("INSUFFICIENT YNC RECORDS")
             else:
-                st.info("No yes_no_complement arbs with yes_ask and no_ask columns found in database.")
+                st.caption("NO YNC RECORDS IN DATABASE")
         else:
-            st.info("Database not connected — YNC correlation unavailable.")
-    except Exception as _ync_err:
-        st.info(f"YNC correlation unavailable: {type(_ync_err).__name__}")
+            # Neon fallback: pull yes_ask/no_ask from live_arbs_cloud YNC rows
+            try:
+                import dashboard.live_arb_store as _las_ync
+                from sqlalchemy import text as _ync_neon_text
+                _ync_neon_eng = (
+                    getattr(_las_ync, "_pg_engine", None)
+                    or _las_ync.get_pg_engine_cached()
+                )
+                if _ync_neon_eng is not None:
+                    with _ync_neon_eng.connect() as _ync_nc:
+                        _ync_neon_rows = _ync_nc.execute(_ync_neon_text(
+                            "SELECT yes_ask, no_ask FROM live_arbs_cloud "
+                            "WHERE strategy_type = 'yes_no_complement' "
+                            "AND yes_ask IS NOT NULL AND no_ask IS NOT NULL"
+                        )).fetchall()
+                    if _ync_neon_rows and len(_ync_neon_rows) >= 5:
+                        import pandas as _pd_ync_n
+                        _ync_ndf = _pd_ync_n.DataFrame(_ync_neon_rows, columns=["yes_ask", "no_ask"])
+                        _ync_ndf["yes_ask"] = _pd_ync_n.to_numeric(_ync_ndf["yes_ask"], errors="coerce")
+                        _ync_ndf["no_ask"]  = _pd_ync_n.to_numeric(_ync_ndf["no_ask"],  errors="coerce")
+                        _ync_ndf = _ync_ndf.dropna()
+                        if len(_ync_ndf) >= 5:
+                            _ync_neon_corr = float(_ync_ndf["yes_ask"].corr(_ync_ndf["no_ask"]))
+                            _neon_corr_color = GREEN if _ync_neon_corr < -0.95 else (AMBER if _ync_neon_corr < -0.85 else RED)
+                            _nyc1, _nyc2, _nyc3 = st.columns(3)
+                            _nyc1.metric(
+                                "YES/NO ASK CORRELATION (NEON)",
+                                f"{_ync_neon_corr:.4f}",
+                                help="Pearson correlation from Neon cloud YNC records · healthy ≈ −1.0",
+                            )
+                            _nyc2.metric("YNC NEON RECORDS", f"{len(_ync_ndf):,}")
+                            _neon_sum_mean = float((_ync_ndf["yes_ask"] + _ync_ndf["no_ask"]).mean())
+                            _nyc3.metric("AVG YES+NO SUM (NEON)", f"{_neon_sum_mean:.4f}")
+                            st.caption("Data from Neon cloud — yes_no_complement feed records (not executable arbs)")
+                        else:
+                            st.caption("INSUFFICIENT NEON YNC RECORDS FOR CORRELATION")
+                    else:
+                        st.caption("YNC correlation unavailable")
+                else:
+                    st.caption("YNC correlation unavailable")
+            except Exception:
+                st.caption("YNC correlation unavailable")
+    except Exception:
+        st.caption("YNC correlation unavailable")
 
     # --- Fee Sensitivity chart -----
     import math as _math_fee
@@ -1393,8 +1555,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         f"color:{TEXT3};margin-bottom:0.3rem;'>FEE SENSITIVITY</div>",
         unsafe_allow_html=True,
     )
-    st.caption("Net edge after Kalshi fee for a range of gross edges (worst-case: p=0.5). "
-               "Fee formula: min(0.035, ceil(0.07 × p × (1−p) × 100) / 100) per contract.")
+    st.caption("Net edge after fee · worst-case p=0.5 · fee = min(3.5¢, ceil(7×p×(1−p))¢)")
     _gross_range = [i * 0.01 for i in range(1, 21)]  # 1¢ to 20¢ in cents (as fractions of $1)
     _p_fee = 0.5  # worst case
     def _kalshi_fee(p: float) -> float:
@@ -1410,7 +1571,7 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         mode="lines+markers",
         line={"color": GREEN, "width": 2},
         marker={"size": 5},
-        name="Net edge after fee",
+        name="NET EDGE AFTER FEE",
     ))
     _fig_fee.add_hline(y=0, line_dash="dash", line_color=RED, line_width=1,
                        annotation_text="break-even", annotation_font_size=8)
@@ -1418,8 +1579,8 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
         title={"text": f"NET EDGE AFTER KALSHI FEE (fee={_fee_per_contract*100:.1f}¢/contract at p=0.5)",
                "font": {"size": 10, "color": TEXT3}},
         height=220,
-        xaxis_title="Gross Edge (¢)",
-        yaxis_title="Net Edge (¢)",
+        xaxis_title="GROSS EDGE (¢)",
+        yaxis_title="NET EDGE (¢)",
         margin={"l": 45, "r": 20, "t": 35, "b": 40},
     ))
     st.plotly_chart(_fig_fee, use_container_width=True)
@@ -1443,13 +1604,13 @@ CE arbs additionally pass all 12 gates of the CE scanner (documented in the Meth
 <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem;'>
 <div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;border-radius:3px;'>
 <div style='font-size:0.6rem;letter-spacing:0.08em;color:{TEXT3};text-transform:uppercase;'>
-CLASS A &mdash;CONFIRMED EXECUTABLE
+CLASS A &mdash; CONFIRMED EXECUTABLE
 </div>
 <div style='font-family:JetBrains Mono,monospace;font-size:1.3rem;color:{GREEN};'>
 {class_a:,}
 </div>
 <div style='font-size:0.65rem;color:{TEXT2};'>
-Live bid/ask confirmed &mdash;executable at stated price
+Live bid/ask confirmed &mdash;executable at stated price (Executable arbs; YNC not executable by exchange design)
 </div>
 </div>
 <div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;border-radius:3px;'>
@@ -1460,9 +1621,7 @@ CLASS B &mdash;PENDING L2 DEPTH
 {class_b:,}
 </div>
 <div style='font-size:0.65rem;color:{TEXT2};'>
-Mid/candlestick implied &mdash;requires full L2 for confirmation.
-These {class_b:,} were detected on {_detect_date} during market settlement,
-which likely explains the unusually large edge values.
+Mid/candlestick implied &mdash;requires full L2 for confirmation ({_detect_date}, settlement-period large edges)
 </div>
 </div>
 </div>
@@ -1471,12 +1630,12 @@ which likely explains the unusually large edge values.
     if hist_stats:
         _badge("OBSERVED", GREEN)
         rows = [
-            ("Total opportunities detected", f"{int(hist_stats.get('total_opportunities') or 0):,}"),
-            ("Confirmed executable (Class A)", f"{class_a:,}"),
-            ("Median net edge", f"{float(hist_stats.get('median_edge_cents') or 0):.2f}c"),
-            ("Mean net edge", f"{float(hist_stats.get('mean_edge_cents') or 0):.2f}c"),
-            ("Maximum net edge", f"{float(hist_stats.get('max_edge_cents') or 0):.2f}c"),
-            ("Median opportunity lifetime", (lambda s: f"{int(s//60)}m{int(s%60)}s" if s >= 60 else f"{int(s)}s")(float(hist_stats.get('median_lifetime_s') or 0))),
+            ("TOTAL ARB DETECTIONS", f"{int(hist_stats.get('total_opportunities') or 0):,}"),
+            ("CONFIRMED EXECUTABLE — CLASS A", f"{class_a:,}"),
+            ("MEDIAN NET EDGE", f"{float(hist_stats.get('median_edge_cents') or 0):.2f}¢"),
+            ("MEAN NET EDGE", f"{float(hist_stats.get('mean_edge_cents') or 0):.2f}¢"),
+            ("MAXIMUM NET EDGE", f"{float(hist_stats.get('max_edge_cents') or 0):.2f}¢"),
+            ("MEDIAN OPPORTUNITY LIFETIME", (lambda s: f"{int(s//60)}m{int(s%60)}s" if s >= 60 else f"{int(s)}s")(float(hist_stats.get('median_lifetime_s') or 0))),
         ]
         _stat_table(rows)
 
@@ -1486,7 +1645,7 @@ which likely explains the unusually large edge values.
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
             f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-            f"color:{TEXT3};margin-bottom:0.3rem;'>ARB DETECTIONS TIMELINE</div>",
+            f"color:{TEXT3};margin-bottom:0.3rem;'>DETECTION TIMELINE</div>",
             unsafe_allow_html=True,
         )
         _badge("OBSERVED", GREEN)
@@ -1496,12 +1655,12 @@ which likely explains the unusually large edge values.
         _fig_tl = go.Figure()
         _fig_tl.add_trace(go.Bar(
             x=_tl["day"], y=_tl["count"],
-            name="Daily Detections",
+            name="DAILY DETECTIONS",
             marker_color=BLUE, marker_line_width=0, opacity=0.55,
         ))
         _fig_tl.add_trace(go.Scatter(
             x=_tl["day"], y=_tl["count"],
-            name="Count",
+            name="COUNT",
             mode="lines+markers",
             line={"color": GREEN, "width": 1.8},
             marker={"size": 4},
@@ -1510,22 +1669,21 @@ which likely explains the unusually large edge values.
             _fig_tl.add_trace(go.Scatter(
                 x=_tl["day"],
                 y=pd.to_numeric(_tl["rolling_7d_count"], errors="coerce"),
-                name="7-Day Rolling Avg",
+                name="7-DAY ROLLING AVG",
                 mode="lines",
                 line={"color": AMBER, "width": 1.5, "dash": "dot"},
             ))
         _fig_tl.update_layout(**plotly_dark_layout(
-            title={"text": "ARB OPPORTUNITIES DETECTED BY DAY", "font": {"size": 10, "color": TEXT3}},
+            title={"text": "DETECTIONS BY DAY", "font": {"size": 10, "color": TEXT3}},
             height=240,
             xaxis_title="",
-            yaxis_title="Opportunities",
+            yaxis_title="OPPORTUNITIES",
             legend={"x": 0, "y": 1, "bgcolor": "rgba(0,0,0,0)"},
             margin={"l": 45, "r": 20, "t": 35, "b": 30},
         ))
         st.plotly_chart(_fig_tl, use_container_width=True)
         st.caption(
-            f"Daily arb detection counts from the reference database. "
-            f"Each bar = opportunities passing all 7 validation gates on that day."
+            "Daily executable arb detections from the reference DB"
         )
 
     # --- Arb by category breakdown -----
@@ -1535,7 +1693,7 @@ which likely explains the unusually large edge values.
         st.markdown(
             f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
             f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
-            f"ARB OPPORTUNITIES BY CATEGORY</div>",
+            f"DETECTIONS BY CATEGORY (CE/ME/TH · YNC not executable)</div>",
             unsafe_allow_html=True,
         )
         _badge("OBSERVED", GREEN)
@@ -1543,12 +1701,12 @@ which likely explains the unusually large edge values.
         if "avg_edge_cents" in _cat_display.columns:
             _cat_display["avg_edge_cents"] = pd.to_numeric(
                 _cat_display["avg_edge_cents"], errors="coerce"
-            ).apply(lambda v: f"{v:.2f}c" if pd.notna(v) else "--")
+            ).apply(lambda v: f"{v:.2f}¢" if pd.notna(v) else "--")
         _cat_cols = [c for c in ["category", "count", "avg_edge_cents", "class_a_count", "class_b_count"] if c in _cat_display.columns]
         st.dataframe(
             _cat_display[_cat_cols].rename(columns={
                 "category": "CATEGORY", "count": "COUNT",
-                "avg_edge_cents": "AVG EDGE", "class_a_count": "CLASS A", "class_b_count": "CLASS B",
+                "avg_edge_cents": "AVG EDGE (¢)", "class_a_count": "CLASS A", "class_b_count": "CLASS B",
             }),
             use_container_width=True, hide_index=True,
         )
@@ -1585,18 +1743,11 @@ and promoted to Class B (pending manual review) rather than Class A (actionable)
         unsafe_allow_html=True,
     )
 
-    st.info("CE scanning is disabled. Only YES/NO complement (YNC) arbs are detected.")
+    st.caption("CE/ME/TH scanners active · YNC not executable (exchange design)")
 
     st.markdown("<br>", unsafe_allow_html=True)
     _badge("UNVERIFIED", TEXT3)
-    st.markdown("""
-**Interpretation caveats:**
-- L2 depth at detection time determines executability; thin books reduce fill certainty.
-- Candlestick OHLC data does not guarantee fill at the open/close price used for detection.
-- Arbitrage opportunities may persist for insufficient time to execute both legs.
-- Kalshi enforces a taker fee; small edge opportunities are consumed entirely by fees.
-- Settlement latency and queue priority are not modelled.
-""")
+    st.caption("Caveats: L2 depth at detection determines executability · OHLC data ≠ guaranteed fill · legs must execute simultaneously · fee consumes small edges · latency/queue not modelled")
 
 
 def _render_data_coverage():
@@ -1606,26 +1757,90 @@ def _render_data_coverage():
     from dashboard.data_layer import get_system_health, get_coverage_stats, get_historical_arb_stats
     health   = get_system_health()
     coverage = get_coverage_stats()
+    # Single cached CTE round-trip for all arb-store stats (trend, DQA, gate counts)
+    _asts = get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0)
     is_sqlite = not health.get("db_connected", False) and health.get("db_mode") == "sqlite"
 
     # Show historical arb count from reference DB
     hist = get_historical_arb_stats()
-    arb_label = "Arbitrage opps detected"
+    arb_label = "Detections in DB (CE/ME/TH arbs)"
     arb_val   = f"{int(hist.get('total_opportunities', 0)):,}" if is_sqlite else f"{int(health.get('arb_opportunities_open', 0) or 0):,}"
 
     def _dash_if_zero(v):
         return "--" if v == "0" else v
 
     rows = [
-        ("Total markets in DB",         f"{int(health.get('markets_total', 0) or 0):,}"),
-        ("Total events in DB",           _dash_if_zero(f"{int(health.get('events_total', 0) or 0):,}") if is_sqlite else f"{int(health.get('events_total', 0) or 0):,}"),
-        ("Total trades in DB",           _dash_if_zero(f"{int(health.get('trades_total', 0) or 0):,}") if is_sqlite else f"{int(health.get('trades_total', 0) or 0):,}"),
-        ("Contract relationships",       f"{int(health.get('relationships_total', 0) or 0):,}"),
+        ("TOTAL MARKETS IN DB",         f"{int(health.get('markets_total', 0) or 0):,}"),
+        ("TOTAL EVENTS IN DB",           _dash_if_zero(f"{int(health.get('events_total', 0) or 0):,}") if is_sqlite else f"{int(health.get('events_total', 0) or 0):,}"),
+        ("TOTAL TRADES IN DB",           _dash_if_zero(f"{int(health.get('trades_total', 0) or 0):,}") if is_sqlite else f"{int(health.get('trades_total', 0) or 0):,}"),
+        ("CONTRACT RELATIONSHIPS",       f"{int(health.get('relationships_total', 0) or 0):,}"),
         ("L2 snapshots (order book)",    _dash_if_zero(f"{int(health.get('l2_snapshots_total', 0) or 0):,}") if is_sqlite else f"{int(health.get('l2_snapshots_total', 0) or 0):,}"),
         (arb_label,                      arb_val),
         ("Canadian markets in DB",       f"{int(coverage.get('canadian_markets', 0)):,}"),
     ]
     _stat_table(rows)
+
+    # --- Neon cloud arb store stats -----
+    _neon_n_all = int(_asts.get("n_all", 0) or 0)
+    _neon_last_ts = _asts.get("last_ts") or "--"
+    _neon_source = _asts.get("source", "")
+    if _neon_n_all > 0:
+        _neon_avg_fee = _asts.get("avg_fee_paid")
+        _neon_avg_ret = _asts.get("avg_retention")
+        _fee_str = f"{_neon_avg_fee:.3f}¢" if _neon_avg_fee is not None else "--"
+        _ret_str = f"{_neon_avg_ret*100:.1f}%" if _neon_avg_ret is not None else "--"
+        st.caption(f"Neon cloud arb store · {_neon_n_all:,} arbs · last: {_neon_last_ts[:16] if _neon_last_ts != '--' else '--'} · avg fee: {_fee_str} · avg retention: {_ret_str}")
+        # Top tickers by arb count from Neon
+        try:
+            import dashboard.live_arb_store as _las_dc_top
+            from sqlalchemy import text as _dc_top_text
+            _dc_top_eng = (
+                getattr(_las_dc_top, "_pg_engine", None)
+                or _las_dc_top.get_pg_engine_cached()
+            )
+            if _dc_top_eng is not None:
+                with _dc_top_eng.connect() as _dc_top_c:
+                    _dc_top_rows = _dc_top_c.execute(_dc_top_text(
+                        "SELECT SPLIT_PART(ticker, '-', 1) AS series, "
+                        "COUNT(*) AS n, "
+                        "MAX(net_edge_cents) AS best_edge, "
+                        "AVG(net_edge_cents) AS avg_edge, "
+                        "string_agg(DISTINCT strategy_type, ' / ') AS strategies "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "GROUP BY 1 ORDER BY n DESC LIMIT 10"
+                    )).fetchall()
+                if _dc_top_rows:
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                        f"color:{TEXT3};margin:0.75rem 0 0.3rem;'>TOP ARB SERIES (NEON CLOUD)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    import pandas as _pd_dc_top
+                    _dc_top_df = _pd_dc_top.DataFrame(
+                        _dc_top_rows,
+                        columns=["SERIES", "ARB COUNT", "BEST EDGE (¢)", "AVG EDGE (¢)", "STRATEGIES"]
+                    )
+                    _STRAT_SH_DC = {
+                        "mutually_exclusive": "ME", "threshold_order": "TH",
+                        "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS",
+                    }
+                    _dc_top_df["BEST EDGE (¢)"] = _dc_top_df["BEST EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v else "--"
+                    )
+                    _dc_top_df["AVG EDGE (¢)"] = _dc_top_df["AVG EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v else "--"
+                    )
+                    _dc_top_df["STRATEGIES"] = _dc_top_df["STRATEGIES"].apply(
+                        lambda s: " / ".join(
+                            _STRAT_SH_DC.get(t.strip(), t.strip().upper()[:4])
+                            for t in str(s).split("/") if t.strip()
+                        ) if s else "--"
+                    )
+                    st.dataframe(_dc_top_df, use_container_width=True, hide_index=True)
+        except Exception:
+            pass
 
     # --- Live WS session stats -----
     try:
@@ -1651,10 +1866,10 @@ def _render_data_coverage():
             f"<span style='color:{_conn_color};'>{_conn_label}</span>"
             f"&nbsp;&nbsp;|&nbsp;&nbsp;MARKETS: {_ws_mkts_p09}"
             f"&nbsp;&nbsp;|&nbsp;&nbsp;MSG/S: {_ws_rate_p09:.1f}"
-            f"&nbsp;&nbsp;|&nbsp;&nbsp;SESSION ARBS: {_ws_n_total} "
-            f"(NON-CE: {_ws_n_comp} · CE: {_ws_n_ce})"
-            f"{'&nbsp;&nbsp;|&nbsp;&nbsp;BEST EDGE: <span style=\"color:#22C55E;\">+' + f'{_ws_best_edge:.2f}c</span>' if _ws_best_edge > 0 else ''}"
-            f"</div>",
+            f"&nbsp;&nbsp;|&nbsp;&nbsp;SESSION DETECTIONS: {_ws_n_total} "
+            f"(YNC not executable (exchange design))"
+            + (f"&nbsp;&nbsp;|&nbsp;&nbsp;BEST EDGE: <span style='color:#22C55E;'>+{_ws_best_edge:.2f}¢</span>" if _ws_best_edge > 0 else "")
+            + "</div>",
             unsafe_allow_html=True,
         )
     except Exception:
@@ -1662,105 +1877,66 @@ def _render_data_coverage():
 
     # --- DETECTION TREND: arbs detected in last 1h / 24h / all-time -----
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
-        f"color:{TEXT3};margin-bottom:0.4rem;'>DETECTION TREND</div>",
-        unsafe_allow_html=True,
-    )
     _trend_ok = False
     try:
-        from datetime import datetime as _dt_trend, timezone as _tz_trend, timedelta as _td_trend
-        _now_trend = _dt_trend.now(_tz_trend.utc)
+        _asts = get_arb_store_stats(min_edge_cents=2.0, max_edge_cents=50.0)
+        if _asts:
+            _n_1h_t   = _asts.get("n_1h", 0)
+            _n_24h_t  = _asts.get("n_24h", 0)
+            _n_all_t  = _asts.get("n_all", 0)
+            _prev_1h  = _asts.get("n_prev_1h", None)
+            _prev_24h = _asts.get("n_prev_24h", None)
+            _trend_src = _asts.get("source", "pg")
+            _src_label = (
+                f"<span style='color:{GREEN};'>● NEON CLOUD</span>"
+                if _trend_src == "neon_cloud" else
+                "<span style='color:#94A3B8;'>● ANALYTICS DB</span>"
+            )
+            st.markdown(
+                f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                f"color:{TEXT3};margin-bottom:0.4rem;'>DETECTION TREND &nbsp; {_src_label}</div>",
+                unsafe_allow_html=True,
+            )
 
-        # Try PostgreSQL first (live DB with standard interval syntax)
-        _pg_trend_ok = False
-        try:
-            from database.repository import get_engine as _ge_trend
-            from sqlalchemy import text as _txt_trend
-            _eng_trend = _ge_trend()
-            with _eng_trend.connect() as _conn_trend:
-                _r_1h_pg  = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '1 hour'"
-                )).fetchone()
-                _r_24h_pg = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '24 hours'"
-                )).fetchone()
-                _r_all_pg = _conn_trend.execute(_txt_trend("SELECT COUNT(*) FROM arbs")).fetchone()
-                # Previous periods for deltas
-                _r_prev_1h_pg = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '2 hours' AND ts <= now() - interval '1 hour'"
-                )).fetchone()
-                _r_prev_24h_pg = _conn_trend.execute(_txt_trend(
-                    "SELECT COUNT(*) FROM arbs WHERE ts > now() - interval '48 hours' AND ts <= now() - interval '24 hours'"
-                )).fetchone()
-            _n_1h_t   = int(_r_1h_pg[0])      if _r_1h_pg  else 0
-            _n_24h_t  = int(_r_24h_pg[0])     if _r_24h_pg else 0
-            _n_all_t  = int(_r_all_pg[0])     if _r_all_pg else 0
-            _prev_1h  = int(_r_prev_1h_pg[0]) if _r_prev_1h_pg  else None
-            _prev_24h = int(_r_prev_24h_pg[0])if _r_prev_24h_pg else None
-            _pg_trend_ok = True
-        except Exception:
-            pass
+            def _delta_str(current, previous):
+                if previous is None:
+                    return None
+                diff = current - previous
+                return f"{diff:+,}" if diff != 0 else "0"
 
-        if not _pg_trend_ok:
-            # Fall back to SQLite reference DB
-            from dashboard.data_layer import _sqlite_conn as _gsc_trend
-            _tc = _gsc_trend()
-            _n_1h_t = _n_24h_t = _n_all_t = 0
-            _prev_1h = _prev_24h = None
-            if _tc:
-                _cutoff_1h  = (_now_trend - _td_trend(hours=1)).isoformat()
-                _cutoff_24h = (_now_trend - _td_trend(hours=24)).isoformat()
-                _cutoff_2h  = (_now_trend - _td_trend(hours=2)).isoformat()
-                _cutoff_48h = (_now_trend - _td_trend(hours=48)).isoformat()
-                _r_all = _tc.execute("SELECT COUNT(*) FROM arbitrage_opportunities").fetchone()
-                _r_24h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ?",
-                    (_cutoff_24h,),
-                ).fetchone()
-                _r_1h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ?",
-                    (_cutoff_1h,),
-                ).fetchone()
-                _r_p1h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ? AND detected_at < ?",
-                    (_cutoff_2h, _cutoff_1h),
-                ).fetchone()
-                _r_p24h = _tc.execute(
-                    "SELECT COUNT(*) FROM arbitrage_opportunities WHERE detected_at >= ? AND detected_at < ?",
-                    (_cutoff_48h, _cutoff_24h),
-                ).fetchone()
-                _tc.close()
-                _n_1h_t   = int(_r_1h[0])   if _r_1h   else 0
-                _n_24h_t  = int(_r_24h[0])  if _r_24h  else 0
-                _n_all_t  = int(_r_all[0])  if _r_all  else 0
-                _prev_1h  = int(_r_p1h[0])  if _r_p1h  else None
-                _prev_24h = int(_r_p24h[0]) if _r_p24h else None
+            _d1h  = _delta_str(_n_1h_t,  _prev_1h)
+            _d24h = _delta_str(_n_24h_t, _prev_24h)
 
-        # Compute deltas for display
-        def _delta_str(current, previous):
-            if previous is None:
-                return None
-            diff = current - previous
-            return f"{diff:+,}" if diff != 0 else "0"
-
-        _d1h  = _delta_str(_n_1h_t,  _prev_1h)
-        _d24h = _delta_str(_n_24h_t, _prev_24h)
-
-        _tc1, _tc2, _tc3 = st.columns(3)
-        _tc1.metric("LAST 1H",  f"{_n_1h_t:,}",  delta=_d1h,  help="vs previous 1h window")
-        _tc2.metric("LAST 24H", f"{_n_24h_t:,}", delta=_d24h, help="vs previous 24h window")
-        _tc3.metric("ALL TIME", f"{_n_all_t:,}")
-        _trend_ok = True
+            _tc1, _tc2, _tc3 = st.columns(3)
+            _tc1.metric("LAST 1H",  f"{_n_1h_t:,}",  delta=_d1h,  help="Arb detections in last 1h vs previous 1h")
+            _tc2.metric("LAST 24H", f"{_n_24h_t:,}", delta=_d24h, help="Arb detections in last 24h vs previous 24h")
+            _tc3.metric("ALL TIME", f"{_n_all_t:,}", help="ALL-TIME ARB DETECTIONS")
+            if _trend_src == "neon_cloud" and _asts.get("last_ts"):
+                try:
+                    import time as _p09trend_time, pandas as _p09trend_pd
+                    _p09trend_ts = _p09trend_pd.to_datetime(_asts["last_ts"], utc=True).timestamp()
+                    _p09trend_s = _p09trend_time.time() - _p09trend_ts
+                    if _p09trend_s < 3600: _p09trend_age = f"{int(_p09trend_s//60)}m ago"
+                    elif _p09trend_s < 86400: _p09trend_age = f"{int(_p09trend_s//3600)}h ago"
+                    else: _p09trend_age = f"{int(_p09trend_s//86400)}d ago"
+                except Exception:
+                    _p09trend_age = str(_asts["last_ts"])[:16]
+                st.caption(f"Source: Neon cloud live_arbs_cloud · last detection: {_p09trend_age}")
+            _trend_ok = True
     except Exception:
         pass
 
     if not _trend_ok:
+        st.markdown(
+            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+            f"color:{TEXT3};margin-bottom:0.4rem;'>DETECTION TREND</div>",
+            unsafe_allow_html=True,
+        )
         _tc1, _tc2, _tc3 = st.columns(3)
         _tc1.metric("LAST 1H",  "—")
         _tc2.metric("LAST 24H", "—")
         _tc3.metric("ALL TIME", "—")
-        st.caption("DB offline — detection trend unavailable.")
+        st.caption("DB offline — detection trend unavailable")
 
     # --- DATA QUALITY AUDIT -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1769,72 +1945,21 @@ def _render_data_coverage():
         f"color:{TEXT3};margin-bottom:0.4rem;'>DATA QUALITY AUDIT</div>",
         unsafe_allow_html=True,
     )
-    _dqa_total = 0
-    _dqa_null_net = 0
-    _dqa_invalid_gross = 0
-    _dqa_missing_strat = 0
-    _dqa_last_ts = None
-    _dqa_ok = False
-    # Try PostgreSQL arbs table first
-    try:
-        from database.repository import get_engine as _ge_dqa
-        from sqlalchemy import text as _txt_dqa
-        _eng_dqa = _ge_dqa()
-        with _eng_dqa.connect() as _conn_dqa:
-            _dqa_row = _conn_dqa.execute(_txt_dqa(
-                "SELECT COUNT(*) AS total, "
-                "COUNT(CASE WHEN net_edge_cents IS NULL THEN 1 END) AS null_net, "
-                "COUNT(CASE WHEN gross_edge_cents <= 0 THEN 1 END) AS invalid_gross, "
-                "COUNT(CASE WHEN strategy IS NULL OR strategy = '' THEN 1 END) AS missing_strategy "
-                "FROM arbs"
-            )).fetchone()
-            _dqa_ts_row = _conn_dqa.execute(_txt_dqa("SELECT MAX(ts) FROM arbs")).fetchone()
-        if _dqa_row:
-            _dqa_total          = int(_dqa_row[0] or 0)
-            _dqa_null_net       = int(_dqa_row[1] or 0)
-            _dqa_invalid_gross  = int(_dqa_row[2] or 0)
-            _dqa_missing_strat  = int(_dqa_row[3] or 0)
-        if _dqa_ts_row and _dqa_ts_row[0]:
-            _dqa_last_ts = str(_dqa_ts_row[0])[:19]
-        _dqa_ok = True
-    except Exception:
-        pass
-    # Fall back to SQLite arbitrage_opportunities table
-    if not _dqa_ok:
-        try:
-            from dashboard.data_layer import _sqlite_conn as _gsc_dqa
-            _dqa_conn = _gsc_dqa()
-            if _dqa_conn:
-                _dqa_row2 = _dqa_conn.execute(
-                    "SELECT COUNT(*) AS total, "
-                    "COUNT(CASE WHEN net_edge_cents IS NULL THEN 1 END) AS null_net, "
-                    "COUNT(CASE WHEN CAST(gross_edge_cents AS REAL) <= 0 THEN 1 END) AS invalid_gross, "
-                    "COUNT(CASE WHEN strategy_type IS NULL OR strategy_type = '' THEN 1 END) AS missing_strategy "
-                    "FROM arbitrage_opportunities"
-                ).fetchone()
-                _dqa_ts_row2 = _dqa_conn.execute(
-                    "SELECT MAX(detected_at) FROM arbitrage_opportunities"
-                ).fetchone()
-                _dqa_conn.close()
-                if _dqa_row2:
-                    _dqa_total         = int(_dqa_row2[0] or 0)
-                    _dqa_null_net      = int(_dqa_row2[1] or 0)
-                    _dqa_invalid_gross = int(_dqa_row2[2] or 0)
-                    _dqa_missing_strat = int(_dqa_row2[3] or 0)
-                if _dqa_ts_row2 and _dqa_ts_row2[0]:
-                    _dqa_last_ts = str(_dqa_ts_row2[0])[:19]
-                _dqa_ok = True
-        except Exception:
-            pass
+    _dqa_ok = bool(_asts)
+    _dqa_total         = _asts.get("total", 0)         if _asts else 0
+    _dqa_null_net      = _asts.get("null_net", 0)      if _asts else 0
+    _dqa_invalid_gross = _asts.get("invalid_gross", 0) if _asts else 0
+    _dqa_missing_strat = _asts.get("missing_strategy", 0) if _asts else 0
+    _dqa_last_ts       = _asts.get("last_ts")          if _asts else None
     if _dqa_ok:
         _dqa1, _dqa2, _dqa3, _dqa4 = st.columns(4)
-        _dqa1.metric("Total Records",     f"{_dqa_total:,}")
-        _dqa2.metric("Null Net Edge",     f"{_dqa_null_net:,}",      help="Records where net_edge_cents IS NULL")
-        _dqa3.metric("Invalid Gross",     f"{_dqa_invalid_gross:,}", help="Records where gross_edge_cents <= 0")
-        _dqa4.metric("Missing Strategy",  f"{_dqa_missing_strat:,}", help="Records with no strategy type set")
+        _dqa1.metric("TOTAL RECORDS",     f"{_dqa_total:,}", help="All arb records in DB")
+        _dqa2.metric("NULL NET EDGE",     f"{_dqa_null_net:,}",      help="RECORDS WHERE NET_EDGE_CENTS IS NULL")
+        _dqa3.metric("INVALID GROSS",     f"{_dqa_invalid_gross:,}", help="RECORDS WHERE GROSS_EDGE_CENTS <= 0")
+        _dqa4.metric("MISSING STRATEGY",  f"{_dqa_missing_strat:,}", help="RECORDS WITH NO STRATEGY TYPE SET")
         # Null net edge warning
         if _dqa_total > 0 and (_dqa_null_net / _dqa_total) > 0.05:
-            st.warning("⚠️ >5% records have null net_edge — possible fee calculation errors")
+            st.caption(">5% records have null net_edge")
         # Data completeness progress bar
         _dqa_complete = max(0, _dqa_total - _dqa_null_net - _dqa_invalid_gross)
         _dqa_completeness = _dqa_complete / _dqa_total if _dqa_total > 0 else 1.0
@@ -1852,10 +1977,10 @@ def _render_data_coverage():
                 _dqa_last_str = _dqa_et.strftime("%Y-%m-%d %H:%M:%S ET")
             except Exception:
                 _dqa_last_str = _dqa_last_ts
-            st.metric("Last Ingested", _dqa_last_str)
-        st.caption("Data quality checks — these should all be low relative to total arb count")
+            st.metric("LAST INGESTED", _dqa_last_str)
+        st.caption("Data quality checks · low values = healthy")
     else:
-        st.caption("Data quality audit unavailable — database not connected.")
+        st.caption("Data quality audit unavailable — database not connected")
 
     # --- EXTENDED DATA QUALITY AUDIT: ghost arbs, edge thresholds, drought -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1864,87 +1989,33 @@ def _render_data_coverage():
         f"color:{TEXT3};margin-bottom:0.4rem;'>GATE FILTER COUNTS</div>",
         unsafe_allow_html=True,
     )
-    _MIN_EDGE_CENTS = 2.0   # gate: arbs below this are blocked
-    _MAX_EDGE_CENTS = 50.0  # gate: arbs above this are flagged / capped
-    _ghost_blocked = None
-    _below_min_edge = None
-    _above_max_edge = None
-
-    # Try PostgreSQL arbs table first
-    try:
-        from database.repository import get_engine as _ge_gate
-        from sqlalchemy import text as _txt_gate
-        _eng_gate = _ge_gate()
-        with _eng_gate.connect() as _conn_gate:
-            _ghost_row = _conn_gate.execute(_txt_gate(
-                "SELECT COUNT(*) FROM arbs WHERE net_edge_cents <= 0"
-            )).fetchone()
-            _below_row = _conn_gate.execute(_txt_gate(
-                "SELECT COUNT(*) FROM arbs WHERE net_edge_cents > 0 AND net_edge_cents < :min_e",
-            ), {"min_e": _MIN_EDGE_CENTS}).fetchone()
-            _above_row = _conn_gate.execute(_txt_gate(
-                "SELECT COUNT(*) FROM arbs WHERE net_edge_cents > :max_e",
-            ), {"max_e": _MAX_EDGE_CENTS}).fetchone()
-        _ghost_blocked  = int(_ghost_row[0]) if _ghost_row else 0
-        _below_min_edge = int(_below_row[0]) if _below_row else 0
-        _above_max_edge = int(_above_row[0]) if _above_row else 0
-    except Exception:
-        pass
-
-    # Fallback to SQLite arbitrage_opportunities table
-    if _ghost_blocked is None:
-        try:
-            from dashboard.data_layer import _sqlite_conn as _gsc_gate
-            _gate_conn = _gsc_gate()
-            if _gate_conn:
-                try:
-                    _g_row = _gate_conn.execute(
-                        "SELECT COUNT(*) FROM arbitrage_opportunities WHERE CAST(net_edge_cents AS REAL) <= 0"
-                    ).fetchone()
-                    _b_row = _gate_conn.execute(
-                        "SELECT COUNT(*) FROM arbitrage_opportunities "
-                        "WHERE CAST(net_edge_cents AS REAL) > 0 AND CAST(net_edge_cents AS REAL) < ?",
-                        (_MIN_EDGE_CENTS,),
-                    ).fetchone()
-                    _a_row = _gate_conn.execute(
-                        "SELECT COUNT(*) FROM arbitrage_opportunities "
-                        "WHERE CAST(net_edge_cents AS REAL) > ?",
-                        (_MAX_EDGE_CENTS,),
-                    ).fetchone()
-                    _ghost_blocked  = int(_g_row[0]) if _g_row else 0
-                    _below_min_edge = int(_b_row[0]) if _b_row else 0
-                    _above_max_edge = int(_a_row[0]) if _a_row else 0
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        _gate_conn.close()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    _MIN_EDGE_CENTS = 2.0
+    _MAX_EDGE_CENTS = 50.0
+    _ghost_blocked  = _asts.get("ghost_blocked")  if _asts else None
+    _below_min_edge = _asts.get("below_min_edge") if _asts else None
+    _above_max_edge = _asts.get("above_max_edge") if _asts else None
 
     if _ghost_blocked is not None:
         _gc1, _gc2, _gc3 = st.columns(3)
         _gc1.metric(
-            "Ghost Arbs Blocked",
+            "GHOST ARBS BLOCKED",
             f"{_ghost_blocked:,}",
-            help="Arbs with net_edge_cents ≤ 0 (fees wiped the gross edge — ghost arb gate)",
+            help="Records with net_edge_cents ≤ 0 (fees wiped the gross edge — ghost arb gate)",
         )
         _gc2.metric(
             f"Below Min Edge (<{_MIN_EDGE_CENTS:.0f}¢)",
             f"{_below_min_edge:,}",
-            help=f"Arbs with positive but sub-threshold edge (< {_MIN_EDGE_CENTS:.0f}¢) — excluded by min edge filter",
+            help=f"Records with positive but sub-threshold edge (< {_MIN_EDGE_CENTS:.0f}¢) — excluded by min edge filter (all executable strategies; YNC not executable)",
         )
         _gc3.metric(
             f"Above Max Edge Cap (>{_MAX_EDGE_CENTS:.0f}¢)",
             f"{_above_max_edge:,}",
-            help=f"Arbs with net_edge_cents > {_MAX_EDGE_CENTS:.0f}¢ — flagged as data artifacts (pre-settlement / stale book)",
+            help=f"Records with net_edge_cents > {_MAX_EDGE_CENTS:.0f}¢ — flagged as data artifacts (pre-settlement / stale book; all strategies incl. YNC)",
         )
         if _above_max_edge and _above_max_edge > 0:
-            st.info(f"{_above_max_edge:,} arbs exceed the {_MAX_EDGE_CENTS:.0f}¢ sanity cap — these are likely pre-settlement artifacts and should not be traded.")
+            st.caption(f"{_above_max_edge:,} records exceed {_MAX_EDGE_CENTS:.0f}¢ sanity cap (likely stale-book artifacts)")
     else:
-        st.caption("Gate filter counts unavailable — database not connected.")
+        st.caption("Gate filter counts unavailable — database not connected")
 
     # --- CONSECUTIVE ARB DROUGHT (last 24h) -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1956,38 +2027,9 @@ def _render_data_coverage():
     _drought_minutes = None
     try:
         import pandas as _pd_drought
-        from datetime import datetime as _dt_drought, timezone as _tz_drought, timedelta as _td_drought
+        from datetime import datetime as _dt_drought, timezone as _tz_drought
         _now_drought = _dt_drought.now(_tz_drought.utc)
-        _cutoff_drought = (_now_drought - _td_drought(hours=24)).isoformat()
-
-        # Try PostgreSQL arbs table
-        _drought_ts_list = []
-        try:
-            from database.repository import get_engine as _ge_drought
-            from sqlalchemy import text as _txt_drought
-            _eng_drought = _ge_drought()
-            with _eng_drought.connect() as _conn_drought:
-                _d_rows = _conn_drought.execute(_txt_drought(
-                    "SELECT ts FROM arbs WHERE ts >= :cutoff ORDER BY ts",
-                ), {"cutoff": _cutoff_drought}).fetchall()
-                _drought_ts_list = [r[0] for r in _d_rows if r[0] is not None]
-        except Exception:
-            pass
-
-        # Fallback to SQLite
-        if not _drought_ts_list:
-            try:
-                from dashboard.data_layer import _sqlite_conn as _gsc_drought
-                _dc = _gsc_drought()
-                if _dc:
-                    _dr_rows = _dc.execute(
-                        "SELECT detected_at FROM arbitrage_opportunities WHERE detected_at >= ? ORDER BY detected_at",
-                        (_cutoff_drought,),
-                    ).fetchall()
-                    _dc.close()
-                    _drought_ts_list = [r[0] for r in _dr_rows if r[0] is not None]
-            except Exception:
-                pass
+        _drought_ts_list = get_arb_drought_timestamps(hours=24)
 
         if _drought_ts_list:
             _drought_ts = _pd_drought.to_datetime(_drought_ts_list, utc=True, errors="coerce").dropna()
@@ -2025,20 +2067,20 @@ def _render_data_coverage():
         _dc1.metric(
             "LONGEST ARB DROUGHT (24H)",
             _drought_label,
-            help="Longest consecutive stretch (minutes) with zero arbs detected in the last 24 hours",
+            help="Longest consecutive stretch (minutes) with zero arbs in the last 24 hours",
         )
         _drought_pct = _drought_minutes / (24 * 60) * 100
         _dc2.metric(
             "DROUGHT % OF DAY",
             f"{_drought_pct:.1f}%",
-            help="Fraction of the last 24h with zero arb activity",
+            help="FRACTION OF THE LAST 24H WITH ZERO ARB ACTIVITY",
         )
         if _drought_minutes > 120:
-            st.warning(f"⚠️ Longest arb drought in last 24h: {_drought_label} — scanner may have been offline or market was quiet")
+            st.caption(f"Longest arb drought in last 24h: {_drought_label}")
         else:
-            st.caption(f"Longest no-arb stretch in last 24h: {_drought_label}. Healthy scanners typically see short droughts (< 30m).")
+            st.caption(f"Longest no-arb stretch (24h): {_drought_label}")
     else:
-        st.caption("Arb drought metric unavailable — database not connected.")
+        st.caption("Arb drought metric unavailable — database not connected")
 
     st.markdown("<br>", unsafe_allow_html=True)
     _l2_days  = int(coverage.get("l2_coverage_days", 0))
@@ -2055,22 +2097,16 @@ def _render_data_coverage():
     _ext_assets = 0
     _ext_last = ""
     try:
-        from dashboard.data_layer import get_latest_external_prices as _glep09
-        _lp = _glep09()
-        _ext_assets = len(_lp)
-        if _ext_assets:
-            from database.repository import get_engine as _ge09
-            from sqlalchemy import text as _t09
-            with _ge09().connect() as _c09:
-                _r09 = _c09.execute(_t09("SELECT COUNT(*), MAX(obs_date) FROM ext_market_daily")).fetchone()
-                if _r09:
-                    _ext_rows = int(_r09[0] or 0)
-                    _ext_last = str(_r09[1] or "")[:10]
+        from dashboard.data_layer import get_ext_market_daily_stats as _geds09
+        _eds = _geds09()
+        _ext_assets = _eds.get("n_assets", 0)
+        _ext_rows   = _eds.get("n_rows", 0)
+        _ext_last   = _eds.get("latest", "")
     except Exception:
         pass
     _ext_note = (
         f"{_ext_assets} assets loaded · {_ext_rows:,} rows · last obs {_ext_last}"
-        if _ext_assets else "Cross-asset data not yet loaded. Connect the data pipeline to populate."
+        if _ext_assets else "CROSS-ASSET DATA UNAVAILABLE"
     )
 
     st.markdown(f"""
@@ -2086,7 +2122,6 @@ def _render_data_coverage():
 - Historical L2 data starts January 2026; pre-2026 analysis relies on OHLC candlestick data
 - Synthesis WebSocket is the only live L2 source
 - Canadian market coverage depends on Kalshi's actual market listings
-- Cross-asset data collection is manual and not yet automated
 - Backtesting uses candlestick OHLC data (15-min/60-min/daily) rather than true tick data
 """)
 
@@ -2098,10 +2133,7 @@ and a summary of Canadian macro event coverage.
 """
     st.markdown("#### CROSS-ASSET RESEARCH")
     _badge("PRELIMINARY", AMBER)
-    st.markdown("""
-Canadian macro cross-asset analysis. Compares Kalshi implied probabilities
-against traditional market-derived probabilities (OIS/CORRA, FX, WTI crude).
-""")
+    st.caption("Canadian macro cross-asset analysis · Kalshi vs OIS/CORRA, FX, WTI implied probabilities")
 
     # --- BOC probability snapshot (pure math, no DB) -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -2156,11 +2188,11 @@ against traditional market-derived probabilities (OIS/CORRA, FX, WTI crude).
             **plotly_dark_layout(
             title={"text": f"BOC RATE DISTRIBUTION (OIS={ois_est*100:.2f}%)", "font": {"size": 10, "color": TEXT3}},
             height=220,
-            xaxis_title="Rate", yaxis_title="Implied Probability (%)",
+            xaxis_title="RATE", yaxis_title="IMPLIED PROBABILITY (%)",
             margin={"l": 40, "r": 20, "t": 30, "b": 40},
         ))
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"OIS estimate: {ois_est*100:.2f}% CORRA. Update via cross_asset pipeline when live data is available.")
+        st.caption(f"OIS estimate: {ois_est*100:.2f}% CORRA")
 
         # --- Kalshi vs OIS spread table with Direction column -----
         try:
@@ -2176,16 +2208,16 @@ against traditional market-derived probabilities (OIS/CORRA, FX, WTI crude).
                 if _ois_rows:
                     _ois_df = pd.DataFrame(
                         _ois_rows,
-                        columns=["Market", "Kalshi Price", "OIS Implied", "Spread"],
+                        columns=["MARKET", "KALSHI PRICE", "OIS IMPLIED", "SPREAD"],
                     )
-                    _ois_df["Direction"] = _ois_df["Spread"].apply(
+                    _ois_df["DIRECTION"] = _ois_df["SPREAD"].apply(
                         lambda v: "OVER" if float(v or 0) > 0 else ("UNDER" if float(v or 0) < 0 else "FLAT")
                     )
-                    for col in ["Kalshi Price", "OIS Implied"]:
+                    for col in ["KALSHI PRICE", "OIS IMPLIED"]:
                         _ois_df[col] = pd.to_numeric(_ois_df[col], errors="coerce").apply(
                             lambda v: f"{v:.4f}" if pd.notna(v) else "--"
                         )
-                    _ois_df["Spread"] = pd.to_numeric(_ois_df["Spread"], errors="coerce").apply(
+                    _ois_df["SPREAD"] = pd.to_numeric(_ois_df["SPREAD"], errors="coerce").apply(
                         lambda v: (f"+{v:.4f}" if v > 0 else f"{v:.4f}") if pd.notna(v) else "--"
                     )
                     st.markdown(
@@ -2195,16 +2227,12 @@ against traditional market-derived probabilities (OIS/CORRA, FX, WTI crude).
                         unsafe_allow_html=True,
                     )
                     st.dataframe(_ois_df, use_container_width=True, hide_index=True)
-                    st.caption(
-                        "Spread = Kalshi Price − OIS Implied. "
-                        "OVER: Kalshi is overpriced relative to OIS model. "
-                        "UNDER: Kalshi is underpriced relative to OIS model."
-                    )
+                    st.caption("Spread = Kalshi − OIS implied · OVER = Kalshi overpriced · UNDER = Kalshi underpriced")
         except Exception:
             pass  # Table not yet populated — silently skip
 
     except Exception:
-        _no_data_panel("BOC probability engine unavailable. Connect the cross-asset pipeline to enable rate probability modeling.")
+        _no_data_panel("BOC probability engine unavailable.")
 
     # --- Cross-asset methodology -----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -2227,16 +2255,70 @@ against traditional market-derived probabilities (OIS/CORRA, FX, WTI crude).
     st.markdown("<br>", unsafe_allow_html=True)
     _badge("OBSERVED", GREEN)
     st.markdown("**Canadian market coverage (from DB):**")
+    _ca_shown = False
     try:
         from dashboard.data_layer import get_canadian_markets
         ca_df, _ = get_canadian_markets()
         if not ca_df.empty:
             show_cols = [c for c in ["ticker", "title", "status", "volume"] if c in ca_df.columns]
             st.dataframe(ca_df[show_cols].head(5), use_container_width=True, height=200, hide_index=True)
-        else:
-            _no_data_panel("No Canadian markets found in DB.")
+            _ca_shown = True
     except Exception:
-        _no_data_panel("Canadian market data unavailable. Connect the database to load live market data.")
+        pass
+    if not _ca_shown:
+        # Neon fallback: show Canadian arbs from live_arbs_cloud
+        try:
+            import dashboard.live_arb_store as _las_p09ca
+            from sqlalchemy import text as _p09ca_text
+            _p09ca_eng = getattr(_las_p09ca, "_pg_engine", None) or _las_p09ca.get_pg_engine_cached()
+            if _p09ca_eng is not None:
+                with _p09ca_eng.connect() as _p09ca_c:
+                    _p09ca_rows = _p09ca_c.execute(_p09ca_text(
+                        "SELECT SPLIT_PART(ticker, '-', 1) AS series, "
+                        "COUNT(*) AS arbs, "
+                        "MAX(net_edge_cents) AS best_edge, "
+                        "MAX(detected_at)::text AS last_seen "
+                        "FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXCAD%' "
+                        "   OR ticker LIKE 'KXCBDECISION%' OR ticker LIKE 'KXCORR%' "
+                        "   OR ticker LIKE 'KXCAHOUSEDEM%') "
+                        "AND net_edge_cents > 0 "
+                        "GROUP BY 1 ORDER BY arbs DESC LIMIT 10"
+                    )).fetchall()
+                if _p09ca_rows:
+                    import pandas as _pd_p09ca
+                    _p09ca_df = _pd_p09ca.DataFrame(
+                        _p09ca_rows,
+                        columns=["SERIES", "ARB COUNT", "BEST EDGE (¢)", "LAST SEEN"],
+                    )
+                    _p09ca_df["BEST EDGE (¢)"] = _p09ca_df["BEST EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v else "--"
+                    )
+                    import time as _p09ca_time
+                    _now_p09ca = _p09ca_time.time()
+                    def _p09ca_age(s):
+                        try:
+                            _t = _pd_p09ca.to_datetime(s, utc=True).timestamp()
+                            _sec = _now_p09ca - _t
+                            if _sec < 3600: return f"{int(_sec//60)}m ago"
+                            if _sec < 86400: return f"{int(_sec//3600)}h ago"
+                            return f"{int(_sec//86400)}d ago"
+                        except Exception:
+                            return str(s)[:10] if s else "--"
+                    _p09ca_df["LAST SEEN"] = _p09ca_df["LAST SEEN"].apply(_p09ca_age)
+                    st.markdown(
+                        f"<div style='font-size:0.58rem;letter-spacing:0.08em;text-transform:uppercase;"
+                        f"color:#22C55E;margin-bottom:0.3rem;'>● NEON — CANADIAN ARB SERIES</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.dataframe(_p09ca_df, use_container_width=True, hide_index=True)
+                    st.caption(f"{len(_p09ca_rows)} Canadian series with arbs detected in Neon cloud store")
+                else:
+                    _no_data_panel("No Canadian arbs found in Neon. Local DB required for full market listing.")
+            else:
+                _no_data_panel("Canadian market data unavailable.")
+        except Exception:
+            _no_data_panel("Canadian market data unavailable.")
 
 
 def _render_price_history():
@@ -2244,7 +2326,7 @@ def _render_price_history():
 PRICE HISTORY tab — candlestick OHLC data from local database.
 Shows top markets by volume, and a drilldown price chart.
 """
-    st.markdown("#### PRICE HISTORY — Candlestick Data")
+    st.markdown("#### PRICE HISTORY — CANDLESTICK DATA")
     _badge("OBSERVED", GREEN)
     # Build a dynamic description from the candlestick DB
     _cdl_desc = "Historical YES bid/ask and trade price data from Kalshi candlestick API."
@@ -2292,7 +2374,7 @@ Shows top markets by volume, and a drilldown price chart.
         fig_vol.update_layout(**plotly_dark_layout(
             title={"text": "TOTAL VOLUME BY MARKET", "font": {"size": 10, "color": TEXT3}},
             height=500,
-            xaxis_title="Volume (contracts)",
+            xaxis_title="VOLUME (CONTRACTS)",
             yaxis={"autorange": "reversed"},
             margin={"l": 10, "r": 60, "t": 30, "b": 30},
         ))
@@ -2317,7 +2399,7 @@ Shows top markets by volume, and a drilldown price chart.
             "candle_count": "CANDLES", "avg_price": "AVG PRICE",
             "avg_spread": "AVG SPREAD", "first_candle": "FIRST", "last_candle": "LAST",
         }), use_container_width=True, height=300, hide_index=True)
-        st.caption("Prices on 0.00–1.00 scale (YES probability; 0.55 = 55¢ contract value). SPREAD = YES ask − YES bid.")
+        st.caption("Prices on 0.00–1.00 scale (YES probability; 0.55 = 55¢) · SPREAD = YES ask − YES bid")
 
         # Price history drilldown
         st.markdown("<hr style='margin:0.75rem 0;'>", unsafe_allow_html=True)
@@ -2411,10 +2493,10 @@ Shows top markets by volume, and a drilldown price chart.
                     fig_p.update_layout(**plotly_dark_layout(
                         title={"text": f"{_sel_ticker} — PRICE HISTORY", "font": {"size": 10, "color": TEXT3}},
                         height=380,
-                        xaxis_title="", yaxis_title="YES Price",
+                        xaxis_title="", yaxis_title="YES PRICE",
                         yaxis=dict(range=[0, 1], tickformat=".2f"),
                         yaxis2=dict(
-                            title="Volume", overlaying="y", side="right",
+                            title="VOLUME", overlaying="y", side="right",
                             showgrid=False,
                         ),
                         legend=dict(orientation="h", y=1.08),
@@ -2429,17 +2511,10 @@ Shows top markets by volume, and a drilldown price chart.
                         + (" · Dotted lines = live WS quote" if _live_caption_extra else "")
                     )
                 elif price_err:
-                    st.warning(
-                        f"Price history unavailable for {_sel_ticker}: {price_err}. "
-                        "Run the candlestick ingestion pipeline: "
-                        "`python -m scripts.ingest_candlesticks` (or equivalent)."
-                    )
+                    st.caption(f"Price history unavailable for {_sel_ticker}")
                 else:
                     _interval_label = {15: "15m", 60: "1h", 1440: "1d"}.get(_interval, str(_interval))
-                    st.info(
-                        f"No {_interval_label} candles found for **{_sel_ticker}**. "
-                        "Try switching to 1h or 1d, or ingest data for this market first."
-                    )
+                    st.caption(f"No {_interval_label} candles found for {_sel_ticker}")
     elif vol_err:
         _no_data_panel(
             f"Candlestick data unavailable: {vol_err}. "
@@ -2498,11 +2573,5 @@ color:{TEXT};'>{value}</span>
 
 
 def _no_data_panel(msg: str):
-    from dashboard.styles import PANEL, BORDER, TEXT3
-    st.markdown(
-        f"<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;border-radius:3px;"
-        f"color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;'>"
-        f"NO DATA — {msg}</div>",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"No data — {msg.rstrip('.')}")
 

@@ -44,7 +44,7 @@ def fetch_synthesis_markets(
     Return (tickers, event_groups) from Synthesis REST API.
 
     tickers      — flat list of all Kalshi market tickers for WS subscription
-    event_groups — {event_id: [ticker, ...]} for ME / CE / threshold scanning
+    event_groups — {event_id: [ticker, ...]} for CE / ME / TH scanning
 
     Caches result to data/synthesis_markets_cache.json; uses cache if fresh.
     Falls back to empty event_groups on any error.
@@ -56,22 +56,26 @@ def fetch_synthesis_markets(
         logger.warning("SYNTHESIS_SECRET_KEY not set — Synthesis discovery unavailable")
         return [], {}
 
-    # --- Cache check --------------------------------------------------------
-    if not force_refresh and _SYNTHESIS_CACHE_PATH.exists():
-        age_h = (time.time() - _SYNTHESIS_CACHE_PATH.stat().st_mtime) / 3600
-        if age_h < cache_ttl_hours:
-            try:
-                with open(_SYNTHESIS_CACHE_PATH) as fh:
-                    cached = json.load(fh)
-                tickers      = cached["tickers"]
-                event_groups = cached["event_groups"]
-                logger.info(
-                    "Synthesis cache loaded: %d tickers, %d event groups (age %.1fh)",
-                    len(tickers), len(event_groups), age_h,
-                )
-                return tickers, event_groups
-            except Exception as exc:
-                logger.warning("Synthesis cache load failed (%s) — re-fetching", exc)
+    # --- Load stale cache as fallback (always, even if expired) ----------------
+    _stale_tickers: List[str] = []
+    _stale_groups: Dict[str, List[str]] = {}
+    if _SYNTHESIS_CACHE_PATH.exists():
+        try:
+            with open(_SYNTHESIS_CACHE_PATH) as fh:
+                _cached = json.load(fh)
+            _stale_tickers = _cached.get("tickers", [])
+            _stale_groups  = _cached.get("event_groups", {})
+            _age_h = (time.time() - _SYNTHESIS_CACHE_PATH.stat().st_mtime) / 3600
+            logger.info(
+                "Synthesis stale cache available: %d tickers, %d groups (age %.1fh)",
+                len(_stale_tickers), len(_stale_groups), _age_h,
+            )
+            # Return immediately if cache is fresh enough and not forcing refresh
+            if not force_refresh and _age_h < cache_ttl_hours:
+                logger.info("Synthesis cache is fresh — skipping API fetch")
+                return _stale_tickers, _stale_groups
+        except Exception as exc:
+            logger.warning("Synthesis stale cache load failed (%s)", exc)
 
     # --- Fetch from Synthesis REST ------------------------------------------
     headers = {"X-PROJECT-API-KEY": synthesis_key, "User-Agent": "kalshi-arb"}
@@ -82,16 +86,26 @@ def fetch_synthesis_markets(
 
     logger.info("Fetching Synthesis Kalshi market list (this takes ~60-90s for full universe)…")
     while True:
-        try:
-            r = _req.get(
-                f"{_SYNTHESIS_BASE}/api/v1/kalshi/markets?limit=250&offset={offset}",
-                headers=headers,
-                timeout=30,
-            )
-            r.raise_for_status()
-            batch = r.json().get("response", [])
-        except Exception as exc:
-            logger.warning("Synthesis fetch error at offset=%d: %s — stopping early", offset, exc)
+        batch = None
+        for _attempt in range(3):  # retry up to 3x on timeout/error
+            try:
+                r = _req.get(
+                    f"{_SYNTHESIS_BASE}/api/v1/kalshi/markets?limit=250&offset={offset}",
+                    headers=headers,
+                    timeout=60,  # increased from 30s — Synthesis can be slow
+                )
+                r.raise_for_status()
+                batch = r.json().get("response", [])
+                break
+            except Exception as exc:
+                logger.warning(
+                    "Synthesis fetch error at offset=%d (attempt %d/3): %s",
+                    offset, _attempt + 1, exc,
+                )
+                if _attempt < 2:
+                    time.sleep(2 ** _attempt)  # 1s, 2s backoff
+        if batch is None:
+            logger.warning("Synthesis fetch failed after 3 attempts at offset=%d — stopping early", offset)
             break
 
         if not batch:
@@ -121,14 +135,24 @@ def fetch_synthesis_markets(
         len(tickers), len(event_groups),
     )
 
+    # --- Stale-cache fallback: if fresh fetch is worse than stale, keep stale --
+    if len(tickers) < len(_stale_tickers) // 2 and _stale_tickers:
+        logger.warning(
+            "Fresh fetch returned only %d tickers vs stale cache %d — "
+            "API fetch incomplete; using stale cache as fallback",
+            len(tickers), len(_stale_tickers),
+        )
+        return _stale_tickers, _stale_groups
+
     # --- Persist cache ------------------------------------------------------
-    try:
-        _SYNTHESIS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_SYNTHESIS_CACHE_PATH, "w") as fh:
-            json.dump({"tickers": tickers, "event_groups": event_groups}, fh)
-        logger.info("Synthesis market cache saved to %s", _SYNTHESIS_CACHE_PATH)
-    except Exception as exc:
-        logger.warning("Synthesis cache save failed: %s", exc)
+    if tickers:
+        try:
+            _SYNTHESIS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(_SYNTHESIS_CACHE_PATH, "w") as fh:
+                json.dump({"tickers": tickers, "event_groups": event_groups}, fh)
+            logger.info("Synthesis market cache saved to %s", _SYNTHESIS_CACHE_PATH)
+        except Exception as exc:
+            logger.warning("Synthesis cache save failed: %s", exc)
 
     return tickers, event_groups
 

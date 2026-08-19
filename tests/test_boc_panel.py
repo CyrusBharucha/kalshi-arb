@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_boc_panel.py
 =======================
 Unit tests for dashboard/boc_panel.py pure helpers:

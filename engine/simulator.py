@@ -1,4 +1,4 @@
-﻿"""
+"""
 execution/simulator.py
 Realistic execution simulator.
 

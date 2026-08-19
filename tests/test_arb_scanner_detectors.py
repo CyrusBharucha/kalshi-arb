@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_arb_scanner_detectors.py
 ======================================
 Unit tests for analysis/historical_arb_scanner.py violation-detection functions:

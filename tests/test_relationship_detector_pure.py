@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_relationship_detector_pure.py
 ==========================================
 Unit tests for pure helper functions in markets/relationship_detector.py:

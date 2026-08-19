@@ -16,7 +16,15 @@ This project connects to Kalshi's live orderbook feed, scans for those mispricin
 
 ## Strategy
 
-**YES/NO Complement (YNC):** when `yes_ask + no_ask < $1.00` after fees on the same contract, buying both sides locks in a risk-free profit regardless of outcome.
+Three scanners run simultaneously on a 1-second cycle:
+
+**YES/NO Complement (YNC):** when `yes_ask + no_ask < $1.00` after fees on the same contract, buying both sides locks in a guaranteed profit. In practice Kalshi prices YES and NO as complements (NO ask = 1 − YES bid), so the sum ≥ $1.00 always — YNC detections are feed/rounding artifacts.
+
+**Mutually Exclusive (ME):** when the sum of NO asks across all outcomes of one event is below N−1 (where N is the leg count), buying all NO legs costs less than the guaranteed $1 payout when exactly one outcome resolves YES.
+
+**Threshold Order (TH):** when a superset YES leg and a subset NO leg are mispriced relative to each other (monotonicity violation), buying both locks in a risk-free edge.
+
+**CE (Collectively Exhaustive):** currently disabled pending false-positive review. Would detect when the sum of YES asks across all event outcomes is below $1.00.
 
 Kalshi charges a fee per leg:
 
@@ -30,7 +38,7 @@ where P is the price in dollars. Net edge must clear 2 cents after both legs' fe
 
 ## What the dashboard shows
 
-Ten pages covering live arb detections, historical opportunity log, full Kalshi market browser, orderbook depth and imbalance, Canadian rate market analysis, cross-asset context, backtesting, research methodology, and system health. The scanner runs as a background WebSocket thread and writes to a cloud Postgres database that the dashboard reads from.
+Eleven pages covering live arb detections, historical opportunity log, full Kalshi market browser, orderbook depth and imbalance, Canadian rate market analysis, cross-asset context, backtesting, research methodology, and system health. The scanner runs as a background WebSocket thread and writes to a cloud Postgres database that the dashboard reads from.
 
 ---
 
@@ -47,4 +55,4 @@ The main challenge is not finding the arbs, it is filtering out the false ones. 
 | Live feed | Synthesis WebSocket (Kalshi L2), ~3,400 msg/sec |
 | Scanner | Python background thread, 1-second cycle |
 | Storage | Neon PostgreSQL (cloud) + SQLite (local fallback) |
-| Dashboard | Streamlit, 10 pages |
+| Dashboard | Streamlit, 11 pages |

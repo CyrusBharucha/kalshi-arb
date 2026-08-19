@@ -2,7 +2,10 @@ name: Keep Streamlit App Alive
 
 on:
   schedule:
-    - cron: "*/20 * * * *"   # every 20 minutes, 24/7
+    - cron: "0 * * * *"    # top of every hour
+    - cron: "30 * * * *"   # bottom of every hour
+    - cron: "15 * * * *"   # quarter-past every hour
+    - cron: "45 * * * *"   # quarter-to every hour
   workflow_dispatch:          # manual trigger from GitHub UI
 
 jobs:
@@ -17,10 +20,33 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-playwright-1.45
+          restore-keys: |
+            ${{ runner.os }}-pip-playwright-
+
+      - name: Cache Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-1.45.0
+          restore-keys: |
+            ${{ runner.os }}-playwright-chromium-
+
       - name: Install playwright
-        run: |
-          pip install playwright
-          playwright install chromium --with-deps
+        run: pip install playwright==1.45.0
+
+      - name: Install Chromium (skip if cached)
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Chromium deps only (if cached)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       - name: Wake Streamlit app
         env:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_nested_strategy.py
 ==============================
 Unit tests for arbitrage/nested_contracts.py and the underlying

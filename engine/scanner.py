@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/scanner.py
 Live arbitrage scanner - orchestrates all strategies, saves to DB.
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 backtest/engine.py
 Historical arbitrage backtester.
 

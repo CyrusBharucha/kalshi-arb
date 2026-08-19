@@ -18,7 +18,8 @@ STALE       -- last update > 30s ago (possible stale book)
 DISAPPEARED -- edge gone, lifecycle manager closed it
 SETTLED     -- market settled, opportunity resolved
 
-Falls back to live WebSocket complement-arb scan when database is unavailable.
+Falls back to live WebSocket scan when database is unavailable.
+YNC is not executable on Kalshi — YES+NO always >= $1.00 by exchange design.
 """
 from __future__ import annotations
 import html as _html
@@ -92,8 +93,7 @@ def _kalshi_event_url(event_ticker: str) -> str:
 
 
 _STRATEGIES = [
-    "All", "mutually_exclusive", "superset", "threshold_order", "collectively_exhaustive",
-    "yes_no_complement",
+    "ALL", "collectively_exhaustive", "mutually_exclusive", "threshold_order",
 ]
 
 _STATUS_COLORS = {
@@ -115,7 +115,7 @@ def render():
 LIVE ARBITRAGE
 </span>
 <span style='font-size:0.68rem;color:#64748B;letter-spacing:0.04em;margin-left:1rem;'>
-Real-time executable opportunities
+CE/ME/TH executable arbs · live scan
 </span>
 </div>
 """, unsafe_allow_html=True)
@@ -151,12 +151,13 @@ Real-time executable opportunities
 
     with fc1:
         strategy = st.selectbox("STRATEGY", _STRATEGIES, label_visibility="visible")
-        strategy_arg = None if strategy == "All" else strategy
+        # "ALL (" = both executable strategies; individual options filter to one
+        strategy_arg = None if strategy == "ALL" else strategy
 
     with fc2:
         min_edge = st.number_input(
-            "MIN NET EDGE (c)", value=1.0, step=0.5, format="%.1f",
-            help="Minimum net edge in cents after fees"
+            "MIN NET EDGE (¢)", value=1.0, step=0.5, format="%.1f",
+            help="Minimum net edge in ¢ after fees"
         )
 
     with fc3:
@@ -171,7 +172,7 @@ Real-time executable opportunities
         canadian = st.checkbox("CAN ONLY", value=False)
 
     with fc5:
-        _sort_options = ["Net Edge", "Qty"] if _is_sqlite_early else ["Net Edge", "Age", "Qty", "Max P&L"]
+        _sort_options = ["NET EDGE", "Qty"] if _is_sqlite_early else ["NET EDGE", "Age", "Qty", "MAX P&L"]
         sort_by = st.selectbox("SORT BY", _sort_options)
 
     st.markdown("<hr style='margin:0.4rem 0 0.75rem 0;'>", unsafe_allow_html=True)
@@ -186,6 +187,14 @@ Real-time executable opportunities
     _ws_state  = _get_live_state()
     _ws_stats  = _ws_state.get_stats()
     _ws_live   = _ws_stats.get("connected", False)
+    # Check REST scanner
+    _rest_live_p02 = False
+    try:
+        from dashboard.rest_scanner import get_status as _rst_p02
+        _rest_live_p02 = _rst_p02().get("running", False)
+    except Exception:
+        pass
+    _ws_live = _ws_live or _rest_live_p02
 
     # Apply sidebar min-edge filter on top of the main filter row
     try:
@@ -199,14 +208,10 @@ Real-time executable opportunities
         _render_live_fallback(min_edge_cents=_effective_min_edge, strategy_filter=strategy_arg)
         st.markdown("<hr>", unsafe_allow_html=True)
         with st.expander(
-            "Open opportunities (database — arbitrage_opportunities table, status='open')",
+            "OPEN OPPORTUNITIES (DB)",
             expanded=False,
         ):
-            st.caption(
-                "Source: arbitrage_opportunities DB table (status='open' rows). "
-                "These are persisted detections from the scanner — NOT the live in-memory ws_bridge queue shown above. "
-                "Rows here survive session restarts; the live cards above are lost on page reload."
-            )
+            st.caption("Persisted detections (status=open) · survives restarts")
             _hist_df, _hist_err = get_live_arb_opportunities(
                 strategy=strategy_arg,
                 min_net_edge_cents=min_edge,
@@ -220,12 +225,7 @@ Real-time executable opportunities
                         _p02_arb_date = str(pd.to_datetime(_hist_df["detected_at"], utc=True, errors="coerce").min())[:10]
                     except Exception:
                         pass
-                st.markdown(
-                    f"<div style='font-size:0.65rem;color:{TEXT3};"
-                    f"font-family:JetBrains Mono,monospace;padding:0.4rem 0;line-height:1.6;'>"
-                    f"{len(_hist_df):,} open opportunities persisted since {_p02_arb_date}.</div>",
-                    unsafe_allow_html=True,
-                )
+                st.caption(f"{len(_hist_df):,} RECORDS PERSISTED SINCE {_p02_arb_date} (")
                 _hd = _hist_df.copy()
                 if "detected_at" in _hd.columns:
                     _hd["TIME"] = pd.to_datetime(_hd["detected_at"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
@@ -236,20 +236,20 @@ Real-time executable opportunities
                 if "classification" in _hd.columns:
                     _hd["CLASS"] = _hd["classification"]
                 if "gross_edge_cents" in _hd.columns:
-                    _hd["GROSS"] = _hd["gross_edge_cents"].apply(lambda v: f"{float(v):.2f}c" if pd.notna(v) else "--")
+                    _hd["GROSS (¢)"] = _hd["gross_edge_cents"].apply(lambda v: f"{float(v):.2f}" if pd.notna(v) else "--")
                 if "fees_cents" in _hd.columns:
-                    _hd["FEES"] = _hd["fees_cents"].apply(lambda v: f"{float(v):.2f}c" if pd.notna(v) else "--")
+                    _hd["FEES (¢)"] = _hd["fees_cents"].apply(lambda v: f"{float(v):.2f}" if pd.notna(v) else "--")
                 if "net_edge_cents" in _hd.columns:
-                    _hd["NET EDGE"] = _hd["net_edge_cents"].apply(lambda v: f"+{float(v):.2f}c" if pd.notna(v) else "--")
-                _hcols = [c for c in ["TIME", "STRATEGY", "CLASS", "CONTRACT", "GROSS", "FEES", "NET EDGE"] if c in _hd.columns]
+                    _hd["NET EDGE (¢)"] = _hd["net_edge_cents"].apply(lambda v: f"+{float(v):.2f}" if pd.notna(v) else "--")
+                _hcols = [c for c in ["TIME", "STRATEGY", "CLASS", "CONTRACT", "GROSS (¢)", "FEES (¢)", "NET EDGE (¢)"] if c in _hd.columns]
                 st.dataframe(_hd[_hcols], use_container_width=True, height=300, hide_index=True)
             else:
-                st.info("No historical opportunities in the database.")
+                st.caption("NO RECORDS IN DATABASE")
         _render_recently_closed()
         _render_session_arb_history()
         _render_today_arb_log()
         st.markdown("<hr>", unsafe_allow_html=True)
-        with st.expander("📼 RECENT ARBS (Last 10)", expanded=False):
+        with st.expander("RECENT DETECTIONS (LAST 10)", expanded=False):
             _render_recent_arbs_store()
         if auto_refresh and (not _is_sqlite or _ws_live):
             import time as _time
@@ -264,12 +264,8 @@ Real-time executable opportunities
     # Always show live arb cards — _render_live_fallback handles both live and non-live states
     _render_live_fallback(min_edge_cents=_effective_min_edge, strategy_filter=strategy_arg)
     st.markdown("<hr>", unsafe_allow_html=True)
-    with st.expander("Open opportunities (database — arbitrage_opportunities table, status='open')", expanded=False):
-        st.caption(
-            "Source: arbitrage_opportunities DB table (status='open' rows). "
-            "These are persisted scanner detections — not the live in-memory ws_bridge queue. "
-            "Rows survive session restarts; the live cards above are lost on page reload."
-        )
+    with st.expander("OPEN OPPORTUNITIES (DB)", expanded=False):
+        st.caption("Persisted detections (status=open) · survives restarts")
         _hist_df, _hist_err = get_live_arb_opportunities(
             strategy=strategy_arg,
             min_net_edge_cents=min_edge,
@@ -283,36 +279,34 @@ Real-time executable opportunities
                     _p02b_date = str(pd.to_datetime(_hist_df["detected_at"], utc=True, errors="coerce").min())[:10]
                 except Exception:
                     pass
-            st.markdown(
-                f"<div style='font-size:0.65rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
-                f"padding:0.4rem 0;line-height:1.6;'>{len(_hist_df):,} open opportunities persisted since {_p02b_date}.</div>",
-                unsafe_allow_html=True,
-            )
+            st.caption(f"{len(_hist_df):,} RECORDS PERSISTED SINCE {_p02b_date} (")
             _hd = _hist_df.copy()
             if "detected_at" in _hd.columns:
                 _hd["TIME"] = pd.to_datetime(_hd["detected_at"], utc=True, errors="coerce").dt.strftime("%m/%d %H:%M")
+            _STRAT_SH_P02H = {
+                "mutually_exclusive": "ME", "threshold_order": "TH",
+                "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS",
+            }
             if "strategy_type" in _hd.columns:
-                _hd["STRATEGY"] = _hd["strategy_type"].str.upper()
+                _hd["STRATEGY"] = _hd["strategy_type"].apply(
+                    lambda s: _STRAT_SH_P02H.get(str(s).lower(), str(s).upper()[:6]) if pd.notna(s) else "--"
+                )
             if "classification" in _hd.columns:
                 _hd["CLASS"] = _hd["classification"]
             if "gross_edge_cents" in _hd.columns:
-                _hd["GROSS"] = _hd["gross_edge_cents"].apply(lambda v: f"{float(v):.2f}c" if pd.notna(v) else "--")
+                _hd["GROSS (¢)"] = _hd["gross_edge_cents"].apply(lambda v: f"{float(v):.2f}" if pd.notna(v) else "--")
             if "fees_cents" in _hd.columns:
-                _hd["FEES"] = _hd["fees_cents"].apply(lambda v: f"{float(v):.2f}c" if pd.notna(v) else "--")
+                _hd["FEES (¢)"] = _hd["fees_cents"].apply(lambda v: f"{float(v):.2f}" if pd.notna(v) else "--")
             if "net_edge_cents" in _hd.columns:
-                _hd["NET EDGE"] = _hd["net_edge_cents"].apply(lambda v: f"+{float(v):.2f}c" if pd.notna(v) else "--")
-            _hcols = [c for c in ["TIME","STRATEGY","CLASS","GROSS","FEES","NET EDGE"] if c in _hd.columns]
+                _hd["NET EDGE (¢)"] = _hd["net_edge_cents"].apply(lambda v: f"+{float(v):.2f}" if pd.notna(v) else "--")
+            _hcols = [c for c in ["TIME","STRATEGY","CLASS","GROSS (¢)","FEES (¢)","NET EDGE (¢)"] if c in _hd.columns]
             st.dataframe(_hd[_hcols], use_container_width=True, height=250, hide_index=True)
         else:
-            st.info("No historical opportunities in the database.")
+            st.caption("NO HISTORICAL OPPORTUNITIES IN THE DATABASE")
     _render_today_arb_log()
     st.markdown("<hr>", unsafe_allow_html=True)
-    with st.expander("📼 RECENT ARBS (Last 10)", expanded=False):
+    with st.expander("RECENT DETECTIONS (LAST 10)", expanded=False):
         _render_recent_arbs_store()
-
-    # -- Execution Log --
-    st.markdown("<hr>", unsafe_allow_html=True)
-    _render_execution_log()
 
     if auto_refresh and (not _is_sqlite or _ws_live):
         import time as _time
@@ -347,11 +341,11 @@ def _render_recent_arbs_store():
             _conn_ras = _gsc_ras()
             if _conn_ras:
                 try:
-                    _cnt_row = _conn_ras.execute("SELECT COUNT(*) FROM arbs").fetchone()
+                    _cnt_row = _conn_ras.execute("SELECT COUNT(*) FROM arbs WHERE strategy NOT IN ('yes_no_complement')").fetchone()
                     _total_count = int(_cnt_row[0]) if _cnt_row else 0
                     _raw_ras = _conn_ras.execute(
                         "SELECT ticker, strategy, net_edge_cents, gross_edge_cents, ts "
-                        "FROM arbs ORDER BY ts DESC LIMIT 10"
+                        "FROM arbs WHERE strategy NOT IN ('yes_no_complement') ORDER BY ts DESC LIMIT 10"
                     ).fetchall()
                     _rows_ras = _raw_ras
                 except Exception:
@@ -359,27 +353,35 @@ def _render_recent_arbs_store():
                 finally:
                     _conn_ras.close()
         else:
-            # PostgreSQL path
-            try:
-                from dashboard.data_layer import get_db_connection as _get_db_ras
-                _conn_pg = _get_db_ras()
-                if _conn_pg:
-                    with _conn_pg.cursor() as _cur_ras:
-                        _cur_ras.execute("SELECT COUNT(*) FROM arbs")
-                        _cnt_pg = _cur_ras.fetchone()
-                        _total_count = int(_cnt_pg[0]) if _cnt_pg else 0
-                        _cur_ras.execute(
-                            "SELECT ticker, strategy, net_edge_cents, gross_edge_cents, ts "
-                            "FROM arbs ORDER BY ts DESC LIMIT 10"
-                        )
-                        _rows_ras = _cur_ras.fetchall()
-                    _conn_pg.close()
-            except Exception:
-                _rows_ras = []
+            # PostgreSQL path — use cached function (count + recent rows in one query)
+            from dashboard.data_layer import get_arb_store_recent as _gasr
+            _recent_data = _gasr(limit=10)
+            _total_count = _recent_data.get("total_count", 0)
+            _rows_ras = _recent_data.get("rows", [])
 
         if not _rows_ras:
-            st.info("No arbs logged yet — arbs appear here once detected and saved")
-            st.caption("0 arbs logged in DB")
+            # Fallback: try Neon live_arbs_cloud
+            try:
+                import dashboard.live_arb_store as _las_ras
+                from sqlalchemy import text as _ras_text
+                _ras_eng = getattr(_las_ras, "_pg_engine", None) or _las_ras.get_pg_engine_cached()
+                if _ras_eng is not None:
+                    with _ras_eng.connect() as _ras_c:
+                        _cnt_neon = _ras_c.execute(_ras_text(
+                            "SELECT COUNT(*) FROM live_arbs_cloud WHERE strategy_type NOT IN ('yes_no_complement')"
+                        )).fetchone()
+                        _raw_neon = _ras_c.execute(_ras_text(
+                            "SELECT ticker, strategy_type, net_edge_cents, gross_edge_cents, detected_at "
+                            "FROM live_arbs_cloud WHERE strategy_type NOT IN ('yes_no_complement') "
+                            "ORDER BY detected_at DESC LIMIT 10"
+                        )).fetchall()
+                    if _raw_neon:
+                        _total_count = int(_cnt_neon[0]) if _cnt_neon else len(_raw_neon)
+                        _rows_ras = [(r[0], r[1], r[2], r[3], r[4]) for r in _raw_neon]
+            except Exception:
+                pass
+        if not _rows_ras:
+            st.caption("NO RECORDS LOGGED YET")
             return
 
         _now_ras_epoch = _time_ras.time()
@@ -414,11 +416,15 @@ def _render_recent_arbs_store():
                         _age_str_r = f"{int(_age_s_r // 3600)}h {int((_age_s_r % 3600) // 60)}m ago"
                 except Exception:
                     pass
+            _STRAT_SH_RAS = {
+                "mutually_exclusive": "ME", "threshold_order": "TH",
+                "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS",
+            }
             _disp_rows.append({
                 "TICKER":    str(_ticker_r or "--")[:35],
-                "STRATEGY":  str(_strat_r or "--").upper().replace("_", " "),
-                "NET EDGE":  f"+{float(_net_r):.2f}c" if _net_r is not None else "--",
-                "GROSS EDGE": f"{float(_gross_r):.2f}c" if _gross_r is not None else "--",
+                "STRATEGY":  _STRAT_SH_RAS.get(str(_strat_r or "").lower(), str(_strat_r or "--").upper()[:6]),
+                "NET EDGE":  f"+{float(_net_r):.2f}¢" if _net_r is not None else "--",
+                "GROSS EDGE": f"{float(_gross_r):.2f}¢" if _gross_r is not None else "--",
                 "AGE":       _age_str_r,
                 "TIME (ET)": _ts_str,
             })
@@ -427,13 +433,13 @@ def _render_recent_arbs_store():
         st.markdown(
             "<div style='font-size:0.6rem;letter-spacing:0.12em;text-transform:uppercase;"
             f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
-            "RECENT ARBS (LAST 10) — FROM DB</div>",
+            "RECENT DETECTIONS (LAST 10) — FROM DB</div>",
             unsafe_allow_html=True,
         )
         st.dataframe(_disp_df, use_container_width=True, height=min(385, 35 * len(_disp_df) + 45), hide_index=True)
-        st.caption(f"{_total_count} arbs logged in DB")
+        st.caption(f"{_total_count:,} EXECUTABLE ARBS IN NEON DB")
     except Exception:
-        st.info("No arbs logged yet — arbs appear here once detected and saved")
+        st.caption("NO RECORDS LOGGED YET")
 
 
 def _render_today_arb_log():
@@ -449,14 +455,10 @@ def _render_today_arb_log():
 
     st.markdown("<hr>", unsafe_allow_html=True)
     with st.expander(
-        f"💾 TODAY'S CONFIRMED ARB LOG — {len(_rows_log)} detections (persistent across restarts)",
+        f"TODAY'S DETECTION LOG — {len(_rows_log)} EXECUTABLE ARBS",
         expanded=False,
     ):
-        st.caption(
-            "Source: flat-file JSONL on disk (/tmp/kalshi_arb_log_YYYYMMDD.jsonl), written by the ws_bridge scanner. "
-            "Distinct from both the live in-memory session queue (lost on reload) and the DB table above. "
-            "Every detection that passed all filters appears here and persists across page reloads and session restarts."
-        )
+        st.caption("JSONL flat-file log · distinct from live session queue and DB · persists across reloads")
         _log_disp = []
         for _r in reversed(_rows_log):
             _ts = _r.get("detected_at_ts")
@@ -472,7 +474,7 @@ def _render_today_arb_log():
             _net_l  = float(_r.get("net_edge_cents", 0))
             _n_legs_l = len(_legs) if _legs else ""
             if _strat_l == "yes_no_complement":
-                _act_l = "Buy YES + NO (same market)"
+                _act_l = "FEED ARTIFACT (NOT EXECUTABLE)"
             elif _strat_l == "collectively_exhaustive":
                 _act_l = f"Buy YES on all {_n_legs_l} legs" if _n_legs_l else "Buy YES on all legs"
             elif _strat_l == "mutually_exclusive":
@@ -487,14 +489,14 @@ def _render_today_arb_log():
                 "TIME":      _t_str,
                 "TICKER":    _r.get("ticker", "--"),
                 "ACTION":    _act_l,
-                "GROSS":     f"{float(_r.get('gross_edge_cents', 0)):.2f}c",
-                "NET EDGE":  f"+{_net_l:.2f}c",
+                "GROSS (¢)":   f"{float(_r.get('gross_edge_cents', 0)):.2f}",
+                "NET EDGE (¢)": f"+{_net_l:.2f}",
                 "EXEC QTY":  f"{int(_exec_l):,}" if _exec_l else "--",
                 "CAPITAL":   f"${_capital_l:.2f}" if _capital_l > 0 else "--",
                 "EXP P&L":   f"${_pnl_l:.4f}" if _pnl_l > 0 else "--",
             })
         _log_df = pd.DataFrame(_log_disp)
-        _log_show = [c for c in ["TIME","TICKER","ACTION","GROSS","NET EDGE","EXEC QTY","CAPITAL","EXP P&L"] if c in _log_df.columns]
+        _log_show = [c for c in ["TIME","TICKER","ACTION","GROSS (¢)","NET EDGE (¢)","EXEC QTY","CAPITAL","EXP P&L"] if c in _log_df.columns]
         st.dataframe(_log_df[_log_show], use_container_width=True, height=min(400, 35 * len(_log_disp) + 45), hide_index=True)
         st.download_button(
             "⬇ Download CSV",
@@ -522,7 +524,7 @@ def _render_recently_closed():
     st.markdown(
         f"<div style='font-size:0.6rem;letter-spacing:0.12em;text-transform:uppercase;"
         f"color:{TEXT3};font-family:Inter,sans-serif;margin-bottom:0.4rem;'>"
-        f"RECENTLY CLOSED OPPORTUNITIES (LAST 1H)</div>",
+        f"RECENTLY CLOSED RECORDS (LAST 1H — EXECUTABLE ARBS)</div>",
         unsafe_allow_html=True,
     )
 
@@ -534,7 +536,7 @@ def _render_recently_closed():
     if "markets_involved" in disp.columns:
         disp["CONTRACT"] = disp["markets_involved"].apply(_fmt_markets)
     if "net_edge_cents" in disp.columns:
-        disp["EDGE"] = disp["net_edge_cents"].apply(lambda v: f"+{float(v):.2f}c" if pd.notna(v) else "--")
+        disp["EDGE"] = disp["net_edge_cents"].apply(lambda v: f"+{float(v):.2f}¢" if pd.notna(v) else "--")
     if "duration_seconds" in disp.columns:
         disp["DURATION"] = disp["duration_seconds"].apply(
             lambda s: f"{int(s)}s" if pd.notna(s) and s < 3600 else (f"{int(s//3600)}h{int((s%3600)//60)}m" if pd.notna(s) else "--")
@@ -567,11 +569,12 @@ def _render_session_arb_history():
 
     _state2 = _gls2()
     _session_arbs_raw = [a for a in _state2.get_recent_opportunities(limit=200)
-                         if not _is_sports_ticker(str(a.get("ticker", "")))]
+                         if not _is_sports_ticker(str(a.get("ticker", "")))
+                         and a.get("strategy") != "yes_no_complement"]
     _sess_total = _state2.get_session_stats().get("total", 0)
     if not _session_arbs_raw:
         # Still show a "0 arbs this session" note so user knows scanner is active
-        st.caption(f"📡 Scanner active — 0 arbs detected this session (scanning every 1s)")
+        st.caption("Scanner active — 0 executable arbs this session")
         return
 
     # Split clean vs. high-edge (pre-fix suspect): net_edge_cents > 50c
@@ -595,18 +598,12 @@ def _render_session_arb_history():
 
     st.markdown("<hr>", unsafe_allow_html=True)
     with st.expander(
-        f"📡 SESSION ARB HISTORY — {_showing_n} unique arb{'s' if _showing_n != 1 else ''} this session"
-        + (f" ({_n_redetects} re-detections hidden)" if _n_redetects else "")
+        f"SESSION DETECTION HISTORY — {_showing_n} EXECUTABLE ARB{'S' if _showing_n != 1 else ''} THIS SESSION"
+        + (f" ({_n_redetects} RE-DETECTIONS HIDDEN)" if _n_redetects else "")
         + (f" ({_n_high} high-edge hidden)" if _n_high else ""),
         expanded=False,
     ):
-        st.markdown(
-            f"<div style='font-size:0.65rem;color:{TEXT3};margin-bottom:0.4rem;'>"
-            f"Unique arbs detected this session (1s scan, YES/NO complement). "
-            f"Same event re-detected every 5 min as Gate 5 TTL resets — showing latest detection per event only. "
-            f"Entries with net_edge &gt; 50c are hidden below — they may be pre-fix stale-book CE detections.</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption("Unique arbs this session (1s scan) · latest detection per event · net_edge > 50¢ hidden (stale-book)")
         # Pre-warm title cache in parallel before looping (avoids N × 2s sequential HTTP)
         try:
             from concurrent.futures import ThreadPoolExecutor as _TPE_sh
@@ -656,7 +653,7 @@ def _render_session_arb_history():
             _n_legs_h = len(_legs_h) if _legs_h else ""
             _tn_h = f" — {_title_h}" if _title_h else ""
             if _strat_raw == "yes_no_complement":
-                _action_h = f"Buy YES + NO on same market{_tn_h}"
+                _action_h = f"Feed artifact — not executable{_tn_h}"
             elif _is_ce_h:
                 _action_h = f"Buy YES on all {_n_legs_h} candidates{_tn_h}" if _n_legs_h else f"Buy YES on all candidates{_tn_h}"
             elif _is_me_h:
@@ -686,16 +683,16 @@ def _render_session_arb_history():
                 "MARKET":    _title_h or "--",
                 "ACTION":    _action_h,
                 "LEGS":      _legs_disp,
-                "GROSS EDGE": f"{float(_opp.get('gross_edge_cents', 0)):.2f}c",
-                "FEES":       f"{float(_opp.get('fees_cents', 0)):.2f}c",
-                "NET EDGE":   f"+{_net_h:.2f}c",
+                "GROSS EDGE (¢)": f"{float(_opp.get('gross_edge_cents', 0)):.2f}",
+                "FEES (¢)":       f"{float(_opp.get('fees_cents', 0)):.2f}",
+                "NET EDGE (¢)":   f"+{_net_h:.2f}",
                 "CONTRACTS":  f"{int(_exec_c):,}" if _exec_c else "--",
                 "CAPITAL":    f"${_capital_h:.2f}" if _capital_h > 0 else "--",
                 "EXP P&L":    f"${_pnl_h:.2f}" if _pnl_h > 0 else "--",
                 "profit_100_contracts": f"${_profit_100_h:.2f}",
             })
         _hist_df = pd.DataFrame(_rows)
-        _show_cols = [c for c in ["TIME","STRATEGY","TICKER","MARKET","ACTION","LEGS","GROSS EDGE","FEES","NET EDGE","CONTRACTS","CAPITAL","EXP P&L","profit_100_contracts"] if c in _hist_df.columns]
+        _show_cols = [c for c in ["TIME","STRATEGY","TICKER","MARKET","ACTION","LEGS","GROSS EDGE (¢)","FEES (¢)","NET EDGE (¢)","CONTRACTS","CAPITAL","EXP P&L","profit_100_contracts"] if c in _hist_df.columns]
         st.dataframe(_hist_df[_show_cols], use_container_width=True, height=min(400, 35 * len(_rows) + 45), hide_index=True)
         from datetime import datetime as _dt_sess, timezone as _tz_sess
         st.download_button(
@@ -709,16 +706,10 @@ def _render_session_arb_history():
         # -- High-edge entries (suspected pre-fix stale-book CE arbs) --
         if _high_edge_arbs:
             with st.expander(
-                f"Show high-edge entries (pre-fix) — {_n_high} entries with net_edge > 50c",
+                f"SHOW HIGH-EDGE ENTRIES (PRE-FIX) — {_n_high} ENTRIES WITH NET_EDGE > 50¢",
                 expanded=False,
             ):
-                st.markdown(
-                    f"<div style='font-size:0.63rem;color:{AMBER};margin-bottom:0.5rem;'>"
-                    f"⚠️ pre-fix? &nbsp; These {_n_high} entr{'y' if _n_high==1 else 'ies'} have net_edge &gt; 50c. "
-                    f"High-edge CE arbs detected before the Gate 1b stale-book fix was deployed "
-                    f"may have been re-detected from stale order books. Review before acting.</div>",
-                    unsafe_allow_html=True,
-                )
+                st.caption(f"{_n_high} ENTR{'Y' if _n_high==1 else 'IES'} WITH NET_EDGE >50¢ — PRE-FIX STALE-BOOK DETECTIONS (BEFORE GATE 1B) · HISTORICAL ONLY")
                 _hi_rows = []
                 for _opp in _high_edge_arbs:
                     _ts = _opp.get("detected_at_ts")
@@ -735,39 +726,95 @@ def _render_session_arb_history():
                         "TIME":     _time_str,
                         "STRATEGY": _strat_h,
                         "TICKER":   str(_opp.get("ticker", "--"))[:25],
-                        "GROSS EDGE": f"{float(_opp.get('gross_edge_cents', 0)):.2f}c",
-                        "NET EDGE": f"+{_net_h:.2f}c",
+                        "GROSS EDGE (¢)": f"{float(_opp.get('gross_edge_cents', 0)):.2f}",
+                        "NET EDGE (¢)": f"+{_net_h:.2f}",
                         "CONTRACTS": f"{int(_exec_c):,}" if _exec_c else "--",
-                        "FLAG":     "⚠️ pre-fix?",
+                        "FLAG":     "pre-fix?",
                     })
                 _hi_df = pd.DataFrame(_hi_rows)
-                _hi_cols = [c for c in ["TIME","STRATEGY","TICKER","GROSS EDGE","NET EDGE","CONTRACTS","FLAG"] if c in _hi_df.columns]
+                _hi_cols = [c for c in ["TIME","STRATEGY","TICKER","GROSS EDGE (¢)","NET EDGE (¢)","CONTRACTS","FLAG"] if c in _hi_df.columns]
                 st.dataframe(_hi_df[_hi_cols], use_container_width=True, height=min(300, 35 * len(_hi_rows) + 45), hide_index=True)
 
 
 def _no_opps_banner(n_markets: int = 0, mps: float = 0.0, min_edge_cents: float = 0.0, last_scan_str: str = "--"):
-    from dashboard.styles import PANEL, BORDER, TEXT3
+    import streamlit as _st_nob
+    from dashboard.styles import PANEL, BORDER, TEXT3, GREEN as _G_NOB, AMBER as _A_NOB
     _markets_str = f"{n_markets:,} markets" if n_markets > 0 else "markets"
     _mps_str = f"{mps:.1f} msg/s" if mps > 0 else "--"
     _edge_str = f"≥ {min_edge_cents:.1f}¢" if min_edge_cents > 0 else "after fees"
-    _scan_line = f"Last scan: {last_scan_str}" if last_scan_str and last_scan_str != "--" else "Scanner running"
+    _is_live = mps > 0 or n_markets > 0
+    # Check REST scanner
+    _rest_on_p02 = False
+    _rest_scans_p02 = 0
+    try:
+        from dashboard.rest_scanner import get_status as _rest_st_p02
+        _rs_p02 = _rest_st_p02()
+        _rest_on_p02 = _rs_p02.get("running", False)
+        _rest_scans_p02 = _rs_p02.get("fast_scans", 0) + _rs_p02.get("broad_scans", 0)
+    except Exception:
+        pass
+    _is_live = _is_live or _rest_on_p02
+    # Check if Neon is available (cloud mode) — determines banner title
+    from dashboard.neon_utils import is_neon_connected as _is_neon_nob
+    _nob_neon_ok = _is_neon_nob()
+    if _is_live:
+        _title = "NO ARBS DETECTED — SCANNER IS RUNNING"
+    elif _nob_neon_ok:
+        _title = "SCANNER OFFLINE — NEON CLOUD DATA BELOW"
+    else:
+        _title = "SCANNER OFFLINE — HISTORICAL DATA BELOW"
+    _scan_line = f"Last scan: {last_scan_str}" if last_scan_str and last_scan_str != "--" else ("Scanner running" if _is_live else ("Neon cloud connected — historical arbs available" if _nob_neon_ok else "Start the scanner to detect live arbs"))
     st.markdown(
         f"""<div style='background:{PANEL};border:1px solid {BORDER};
-padding:2rem;border-radius:3px;text-align:center;'>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.85rem;
-color:{TEXT3};letter-spacing:0.06em;'>
-NO LIVE ARBS DETECTED — SCANNER IS RUNNING
-</div>
-<div style='font-size:0.7rem;color:{TEXT3};margin-top:0.5rem;'>
-No fee-adjusted edge {_edge_str} found right now. Adjust MIN NET EDGE above to widen the search.
-</div>
-<div style='font-size:0.65rem;color:{TEXT3};margin-top:0.4rem;
+padding:1rem 1.25rem;border-radius:3px;'>
+<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;
+color:{TEXT3};letter-spacing:0.06em;'>{_title}</div>
+<div style='font-size:0.65rem;color:{TEXT3};margin-top:0.35rem;
 font-family:JetBrains Mono,monospace;letter-spacing:0.04em;'>
-{_scan_line} &nbsp;&middot;&nbsp; Scanning {_markets_str} &nbsp;&middot;&nbsp; Feed: {_mps_str} &nbsp;&middot;&nbsp; Cycle: 1s
+{_scan_line} &nbsp;&middot;&nbsp; {_markets_str} &nbsp;&middot;&nbsp; {_mps_str} &nbsp;&middot;&nbsp; no edge {_edge_str}
 </div>
 </div>""",
         unsafe_allow_html=True,
     )
+    # When scanner is offline, show Neon historical summary inline
+    if not _is_live:
+        try:
+            import dashboard.live_arb_store as _las_p02
+            from sqlalchemy import text as _nob_text
+            _eng_nob = getattr(_las_p02, "_pg_engine", None) or _las_p02.get_pg_engine_cached()
+            if _eng_nob is not None:
+                with _eng_nob.connect() as _c_nob:
+                    _r_nob = _c_nob.execute(_nob_text(
+                        "SELECT COUNT(*), MAX(net_edge_cents), AVG(net_edge_cents), "
+                        "MAX(detected_at) "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0 AND gross_edge_cents < 50"
+                    )).fetchone()
+                if _r_nob and _r_nob[0]:
+                    try:
+                        import time as _p02nob_time
+                        _nob_ts = pd.to_datetime(_r_nob[3], utc=True).timestamp()
+                        _nob_s = _p02nob_time.time() - _nob_ts
+                        if _nob_s < 3600: _last_det = f"{int(_nob_s//60)}m ago"
+                        elif _nob_s < 86400: _last_det = f"{int(_nob_s//3600)}h ago"
+                        else: _last_det = f"{int(_nob_s//86400)}d ago"
+                    except Exception:
+                        _last_det = str(_r_nob[3])[:16] if _r_nob[3] else "--"
+                    st.markdown(
+                        f"<div style='margin-top:0.75rem;background:#0F172A;border:1px solid {_G_NOB}33;"
+                        f"border-left:3px solid {_G_NOB};border-radius:3px;padding:0.6rem 1rem;"
+                        f"font-family:JetBrains Mono,monospace;font-size:0.68rem;color:{TEXT3};'>"
+                        f"<span style='color:{_G_NOB};'>● NEON CLOUD</span> — "
+                        f"<strong style='color:#E2E8F0;'>{int(_r_nob[0])}</strong> historical arbs &nbsp;·&nbsp; "
+                        f"Best: <strong style='color:{_G_NOB};'>{float(_r_nob[1]):.2f}¢</strong> &nbsp;·&nbsp; "
+                        f"Avg: <strong style='color:#E2E8F0;'>{float(_r_nob[2]):.2f}¢</strong> &nbsp;·&nbsp; "
+                        f"Last: {_last_det}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+        except Exception:
+            pass
 
 
 def _fmt_live_status(age_s) -> str:
@@ -832,7 +879,7 @@ def _opp_label(df: pd.DataFrame, oid: str) -> str:
         first = _fmt_markets(raw).split(" | ")[0][:20] if raw else ""
         ticker_str = f" · {first}" if first else ""
     edge_f = float(edge) if pd.notna(edge) else 0.0
-    return f"{strategy.upper()} | +{edge_f:.2f}c{date_str}{ticker_str}"
+    return f"{strategy.upper()} | +{edge_f:.2f}¢{date_str}{ticker_str}"
 
 
 def _render_opportunity_detail(opp_id: str, df: pd.DataFrame):
@@ -851,7 +898,7 @@ border-radius:3px;padding:1rem 1.5rem;margin-bottom:1rem;'>
 </div>
 <div style='font-size:1.6rem;font-family:JetBrains Mono,monospace;
 color:{color};font-weight:400;letter-spacing:-0.02em;'>
-+{float(net_edge):.2f}c / CONTRACT
++{float(net_edge):.2f}¢ / CONTRACT
 </div>
 </div>""",
         unsafe_allow_html=True,
@@ -874,9 +921,9 @@ color:{color};font-weight:400;letter-spacing:-0.02em;'>
         maxpnl_display = "--"
 
     cols = st.columns(5)
-    cols[0].metric("GROSS EDGE",  f"{float(gross):.2f}c")
-    cols[1].metric("FEES",        f"{float(fees):.2f}c")
-    cols[2].metric("NET EDGE",    f"+{float(net):.2f}c")
+    cols[0].metric("GROSS EDGE",  f"{float(gross):.2f}¢")
+    cols[1].metric("FEES",        f"{float(fees):.2f}¢")
+    cols[2].metric("NET EDGE",    f"+{float(net):.2f}¢")
     cols[3].metric("MAX QTY",     f"{int(float(qty)):,}" if pd.notna(qty) and qty != 0 else "--")
     cols[4].metric("MAX P&L",     maxpnl_display)
 
@@ -932,18 +979,18 @@ color:{TEXT};margin-top:4px;word-break:break-all;'>
 def _render_arb_inspect(arbs: list):
     """Selectbox + expander: pick a live arb to see full detail and execution guide."""
     labels = [
-        f"{i}: {a.get('ticker','?')} (+{float(a.get('net_edge_cents', 0)):.2f}c)"
+        f"{i}: {a.get('ticker','?')} (+{float(a.get('net_edge_cents', 0)):.2f}¢)"
         for i, a in enumerate(arbs)
     ]
     sel = st.selectbox(
-        "Select arb to inspect", labels, index=None,
-        placeholder="Choose an opportunity…", key="live_arb_inspect_sel",
+        "SELECT DETECTION TO INSPECT", labels, index=None,
+        placeholder="Choose a detection…", key="live_arb_inspect_sel",
     )
     if sel is None:
         return
     idx = int(sel.split(":")[0])
     arb = arbs[idx]
-    with st.expander("ARB DETAIL", expanded=True):
+    with st.expander("DETECTION DETAIL", expanded=True):
         ticker  = arb.get("ticker", "--")
         strat   = arb.get("strategy", "--")
         legs    = arb.get("legs", [])
@@ -976,18 +1023,19 @@ def _render_arb_inspect(arbs: list):
 
         c1, c2, c3, c4 = st.columns(4)
         c1.markdown(f"**Ticker:** `{ticker}`")
-        c2.markdown(f"**Strategy:** `{strat.replace('_', ' ').upper()}`")
+        _strat_sh_p02d = {"mutually_exclusive": "ME", "threshold_order": "TH", "yes_no_complement": "YNC", "collectively_exhaustive": "CE", "superset": "SS"}
+        c2.markdown(f"**Strategy:** `{_strat_sh_p02d.get(str(strat).lower(), str(strat).upper()[:6])}`")
         c3.markdown(f"**Detected:** {det_str}")
         c4.markdown(f"**Qty available:** {qty:,}" if qty else "**Qty available:** --")
 
         ec1, ec2, ec3 = st.columns(3)
-        ec1.metric("Gross Edge", f"{gross:.2f}c")
-        ec2.metric("Fees", f"{fees:.2f}c")
-        ec3.metric("Net Edge", f"+{net:.2f}c")
+        ec1.metric("GROSS EDGE", f"{gross:.2f}¢")
+        ec2.metric("FEES", f"{fees:.2f}¢")
+        ec3.metric("NET EDGE", f"+{net:.2f}¢")
 
         capital = (ya + na) * qty if qty > 0 else 0.0
         if qty > 0:
-            st.metric("Expected P&L", f"${exp_pnl:.4f}  ({qty:,} contracts × {net:.2f}c)")
+            st.metric("EXPECTED P&L", f"${exp_pnl:.4f}  ({qty:,} contracts × {net:.2f}¢)")
 
         # Kalshi market URL
         _kalshi_base = "https://kalshi.com/markets"
@@ -1004,14 +1052,13 @@ def _render_arb_inspect(arbs: list):
         ) if qty > 0 else f"**Market link:** [{ticker}]({_kalshi_url})  \n\n"
 
         if strat == "yes_no_complement":
-            _ync_name = f"**{_insp_title}**" if _insp_title else f"`{ticker}`"
             guide = (
                 _summary +
-                f"Buy YES + NO on the same market ({_ync_name}):  \n"
-                f"1. Buy YES on `{ticker}` at **{ya:.4f}**  \n"
-                f"2. Buy NO on `{ticker}` at **{na:.4f}** (simultaneously)  \n"
-                f"Combined cost: **{ya+na:.4f}** — guaranteed profit: **{1-(ya+na):.4f}** per contract "
-                f"({net:.2f}c net after fees)."
+                "⚠ **YNC is a feed/rounding artifact — not executable.**  \n"
+                "Kalshi YES and NO on the same market are always complements: "
+                "live YES ask + NO ask ≥ $1.00 structurally.  \n"
+                "This detection reflects a momentary quote below parity in the WS feed, "
+                "not a real arbitrage opportunity."
             )
         elif strat == "collectively_exhaustive":
             _leg_list = legs or [ticker]
@@ -1021,7 +1068,7 @@ def _render_arb_inspect(arbs: list):
                 _summary +
                 f"Buy YES on ALL {len(_leg_list)} {_ce_what} simultaneously:  \n{leg_str}  \n"
                 f"Exactly one candidate resolves YES ($1 payout). "
-                f"Profit: **{net:.2f}c** per contract set."
+                f"Profit: **{net:.2f}¢** per contract set."
             )
         elif strat == "mutually_exclusive":
             _leg_list = legs or [ticker]
@@ -1031,7 +1078,7 @@ def _render_arb_inspect(arbs: list):
                 _summary +
                 f"Buy NO on ALL {len(_leg_list)} {_me_what} simultaneously:  \n{leg_str}  \n"
                 f"Exactly one resolves YES — the remaining {len(_leg_list)-1} NO contracts pay $1 each. "
-                f"Profit: **{net:.2f}c** per contract set."
+                f"Profit: **{net:.2f}¢** per contract set."
             )
         elif strat == "threshold_order":
             l0 = legs[0] if legs else ticker
@@ -1040,7 +1087,7 @@ def _render_arb_inspect(arbs: list):
                 _summary +
                 f"1. Buy YES on `{l0}` (lower threshold) at **{ya:.4f}**  \n"
                 f"2. Buy NO on `{l1}` (higher threshold) at **{na:.4f}** (simultaneously)  \n"
-                f"Spread profit: **{net:.2f}c** per contract."
+                f"Spread profit: **{net:.2f}¢** per contract."
             )
         else:
             guide = _summary + f"Strategy `{strat}`: review leg prices above and place trades accordingly."
@@ -1061,13 +1108,14 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
     n_markets = summary.get("markets", 0)
     connected = summary.get("connected", False)
 
-    # Combine and apply filters
-    all_arbs = [a for a in all_complement + all_ce + all_other
+    # Combine CE + ME/TH/superset arbs; exclude only YNC (feed artifacts, not executable)
+    _all_executable = all_ce + all_other  # CE from ws_bridge Gate 0 + ME/TH/superset
+    all_arbs = [a for a in _all_executable
                 if not _is_sports_ticker(str(a.get("ticker", "")))]
     arbs = all_arbs
     if min_edge_cents > 0:
         arbs = [a for a in arbs if a.get("net_edge_cents", 0) >= min_edge_cents]
-    if strategy_filter:
+    if strategy_filter and strategy_filter != "yes_no_complement":
         arbs = [a for a in arbs if a.get("strategy", "") == strategy_filter]
 
     # Sort all arbs by net_edge_cents descending so best opportunities appear first
@@ -1089,20 +1137,52 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
             _last_det_str = "--"
     else:
         _last_det_str = "--"
-    k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
+    # Fallback: pull last detection timestamp from Neon when no session data
+    if _last_det_str == "--":
+        try:
+            import dashboard.live_arb_store as _las_p02_kpi
+            from sqlalchemy import text as _p02_kpi_text
+            _p02_kpi_eng = getattr(_las_p02_kpi, "_pg_engine", None) or _las_p02_kpi.get_pg_engine_cached()
+            if _p02_kpi_eng is not None:
+                with _p02_kpi_eng.connect() as _p02_kpi_c:
+                    _p02_last_row = _p02_kpi_c.execute(_p02_kpi_text(
+                        "SELECT MAX(detected_at) FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement')"
+                    )).fetchone()
+                if _p02_last_row and _p02_last_row[0]:
+                    _p02_last_dt = _p02_last_row[0]
+                    if hasattr(_p02_last_dt, "strftime"):
+                        import time as _p02_time
+                        _p02_age = _p02_time.time() - _p02_last_dt.timestamp()
+                        if _p02_age < 86400:
+                            _last_det_str = _p02_last_dt.strftime("%H:%M UTC") + " (Neon)"
+                        else:
+                            _last_det_str = _p02_last_dt.strftime("%b %-d") + " (Neon)"
+        except Exception:
+            pass
+    # Feed status: on Streamlit Cloud with Neon connected, show CLOUD not CONNECTING
+    _p02_feed_status: str
+    if connected:
+        _p02_feed_status = "● LIVE"
+    else:
+        from dashboard.neon_utils import is_neon_connected as _is_neon_p02
+        _p02_neon_ok = _is_neon_p02()
+        _p02_feed_status = "● CLOUD" if _p02_neon_ok else "◔ CONNECTING"
+    _me_arbs = [a for a in arbs if a.get("strategy") == "mutually_exclusive"]
+    _th_arbs = [a for a in arbs if a.get("strategy") == "threshold_order"]
+    k1, k2b, k2c, k3, k4, k5, k6, k7 = st.columns(8)
     k1.metric("MARKETS LIVE", f"{n_markets:,}")
-    k2.metric("COMPLEMENT", str(len(complement_arbs)))
-    k3.metric("CE + ME + TH", str(len(ce_arbs) + len(other_arbs)),
-              help="Collectively Exhaustive + Mutually Exclusive + Threshold Order arbs")
+    k2b.metric("ME ARBS", str(len(_me_arbs)), help="Mutually Exclusive — buy NO on all legs")
+    k2c.metric("TH ARBS", str(len(_th_arbs)), help="Threshold Order — buy YES(low) + NO(high)")
     if arbs:
         best = max(a["net_edge_cents"] for a in arbs)
-        k4.metric("BEST NET EDGE", f"+{best:.2f}c")
+        k3.metric("BEST NET EDGE", f"+{best:.2f}¢")
     else:
-        k4.metric("BEST NET EDGE", "--")
-    k5.metric("FEED", "● LIVE" if connected else "◔ CONNECTING")
-    k6.metric("MSG/S", f"{_mps:.1f}")
-    k7.metric("SCAN INTERVAL", "1s")
-    k8.metric("LAST DETECTION", _last_det_str)
+        k3.metric("BEST NET EDGE", "--")
+    k4.metric("FEED", _p02_feed_status)
+    k5.metric("MSG/S", f"{_mps:.1f}")
+    k6.metric("SCAN INTERVAL", "1s")
+    k7.metric("LAST DETECTION", _last_det_str)
 
     st.markdown("<hr style='margin:0.5rem 0;'>", unsafe_allow_html=True)
 
@@ -1116,41 +1196,27 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 f"<div style='background:#1e3a2e;border:1px solid #22c55e;border-radius:4px;"
                 f"padding:0.45rem 1rem;margin-bottom:0.6rem;font-family:JetBrains Mono,monospace;"
                 f"font-size:0.72rem;color:#86efac;letter-spacing:0.04em;'>"
-                f"&#128680; YNC: <strong>{_counts['ync']}</strong> "
-                f"&nbsp;|&nbsp; CE: <strong>{_counts['ce']}</strong> "
-                f"&nbsp;|&nbsp; ME: <strong>{_counts['me']}</strong> "
-                f"&nbsp;|&nbsp; TH: <strong>{_counts['th']}</strong> "
-                f"&nbsp;&nbsp;arbs detected this session"
+                f"&#128680; <strong>{_total_session}</strong> executable arb detections this session"
                 f"</div>",
                 unsafe_allow_html=True,
             )
     except Exception:
         pass
 
-    st.markdown(
-        f"<div style='font-size:0.65rem;color:{TEXT3};margin-bottom:0.4rem;'>"
-        f"Real-time scan — 5 strategies: YES/NO complement, collectively exhaustive, mutually exclusive, superset, threshold order. "
-        f"Scanning {n_markets:,} live markets via Synthesis WebSocket.</div>",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"REAL-TIME SCAN · {n_markets:,} LIVE MARKETS VIA SYNTHESIS WEBSOCKET · 1S INTERVAL")
 
     # -- Strategy summary line
-    _n_ync_sum = len([a for a in arbs if a.get("strategy") == "yes_no_complement"])
-    _n_ce_sum  = len([a for a in arbs if a.get("strategy") == "collectively_exhaustive"])
     _n_me_sum  = len([a for a in arbs if a.get("strategy") == "mutually_exclusive"])
     _n_th_sum  = len([a for a in arbs if a.get("strategy") == "threshold_order"])
-    _n_ss_sum  = len([a for a in arbs if a.get("strategy") == "superset"])
     if arbs:
-        _sum_parts = []
-        if _n_ync_sum: _sum_parts.append(f"<span style='color:#0f766e;font-weight:700;'>{_n_ync_sum} YNC</span>")
-        if _n_ce_sum:  _sum_parts.append(f"<span style='color:#1d4ed8;font-weight:700;'>{_n_ce_sum} CE</span>")
-        if _n_me_sum:  _sum_parts.append(f"<span style='color:#7c3aed;font-weight:700;'>{_n_me_sum} ME</span>")
-        if _n_th_sum:  _sum_parts.append(f"<span style='color:#b45309;font-weight:700;'>{_n_th_sum} TH</span>")
-        if _n_ss_sum:  _sum_parts.append(f"<span style='color:#7c3aed;font-weight:700;'>{_n_ss_sum} SS</span>")
-        _sum_html = " &nbsp;·&nbsp; ".join(_sum_parts)
+        _strat_parts = []
+        if _n_me_sum:  _strat_parts.append(f"{_n_me_sum} ME")
+        if _n_th_sum:  _strat_parts.append(f"{_n_th_sum} TH")
+        _strat_str = " · ".join(_strat_parts) if _strat_parts else f"{len(arbs)} arbs"
         st.markdown(
             f"<div style='font-size:0.68rem;color:{TEXT3};margin-bottom:0.75rem;'>"
-            f"Showing <strong style='color:{TEXT};'>{len(arbs)}</strong> arbs: {_sum_html}</div>",
+            f"Showing <strong style='color:{TEXT};'>{len(arbs)}</strong> detections "
+            f"<span style='color:{TEXT3};'>({_strat_str})</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -1171,15 +1237,92 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         )
         try:
             import time as _time_cd
-            _time_until_next = 30 - (int(_time_cd.time()) % 30)
-            st.caption(f"🔄 Next scan in {_time_until_next}s · Scanner runs continuously (30s cycle)")
+            _time_until_next = 1 - (int(_time_cd.time()) % 1)
+            st.caption(f"NEXT SCAN IN {_time_until_next}S")
         except Exception:
             pass
         st.markdown("<hr>", unsafe_allow_html=True)
-        for _strat in ["yes_no_complement", "collectively_exhaustive",
-                       "mutually_exclusive", "superset", "threshold_order"]:
-            _relationship_panel(_strat)
-            st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
+        # --- Neon recent arbs table (shown when scanner offline but Neon connected) ---
+        try:
+            import dashboard.live_arb_store as _las_p02rt
+            from sqlalchemy import text as _p02rt_text
+            _p02rt_eng = (
+                getattr(_las_p02rt, "_pg_engine", None)
+                or _las_p02rt.get_pg_engine_cached()
+            )
+            if _p02rt_eng is not None:
+                import time as _p02rt_time
+                _now_p02rt = _p02rt_time.time()
+                with _p02rt_eng.connect() as _p02rt_c:
+                    _p02rt_rows = _p02rt_c.execute(_p02rt_text(
+                        "SELECT ticker, strategy_type, net_edge_cents, "
+                        "gross_edge_cents, yes_ask, no_ask, "
+                        "executable_contracts, detected_at "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "ORDER BY detected_at DESC LIMIT 15"
+                    )).fetchall()
+                if _p02rt_rows:
+                    from dashboard.styles import TEXT3 as _TEXT3_p02rt, GREEN as _G_p02rt
+                    import pandas as _pd_p02rt
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;"
+                        f"text-transform:uppercase;color:{_TEXT3_p02rt};"
+                        f"margin:0.75rem 0 0.4rem;'>"
+                        f"<span style='color:{_G_p02rt};'>●</span> RECENT NEON CLOUD ARBS</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _STRAT_SHORT_P02 = {
+                        "mutually_exclusive": "ME",
+                        "threshold_order": "TH",
+                        "yes_no_complement": "YNC",
+                        "collectively_exhaustive": "CE",
+                        "superset": "SS",
+                    }
+                    def _p02rt_age(ts):
+                        try:
+                            import pandas as _pdts
+                            _t = _pdts.to_datetime(ts, utc=True).timestamp()
+                            _s = _now_p02rt - _t
+                            if _s < 3600: return f"{int(_s//60)}m ago"
+                            if _s < 86400: return f"{int(_s//3600)}h ago"
+                            return f"{int(_s//86400)}d ago"
+                        except Exception:
+                            return str(ts)[:10] if ts else "--"
+                    _p02rt_df = _pd_p02rt.DataFrame(
+                        _p02rt_rows,
+                        columns=["TICKER", "STRATEGY", "NET EDGE (¢)", "GROSS EDGE (¢)", "YES ASK", "NO ASK", "QTY", "DETECTED AT"]
+                    )
+                    _p02rt_df["STRATEGY"] = _p02rt_df["STRATEGY"].apply(
+                        lambda s: _STRAT_SHORT_P02.get(str(s), str(s).upper()[:6])
+                    )
+                    _p02rt_df["NET EDGE (¢)"] = _p02rt_df["NET EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v else "--"
+                    )
+                    _p02rt_df["GROSS EDGE (¢)"] = _p02rt_df["GROSS EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v else "--"
+                    )
+                    _p02rt_df["YES ASK"] = _p02rt_df["YES ASK"].apply(
+                        lambda v: f"{float(v):.3f}" if v else "--"
+                    )
+                    _p02rt_df["NO ASK"] = _p02rt_df["NO ASK"].apply(
+                        lambda v: f"{float(v):.3f}" if v else "--"
+                    )
+                    _p02rt_df["QTY"] = _p02rt_df["QTY"].apply(
+                        lambda v: f"{int(v):,}" if v and float(v) > 0 else "--"
+                    )
+                    _p02rt_df["AGE"] = _p02rt_df["DETECTED AT"].apply(_p02rt_age)
+                    _p02rt_df = _p02rt_df.drop(columns=["DETECTED AT"])
+                    st.dataframe(
+                        _p02rt_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(400, 35 * len(_p02rt_rows) + 45),
+                    )
+        except Exception:
+            pass
+        _relationship_panel("yes_no_complement")
         return
 
     # -- SQLite DB path for close_time lookups
@@ -1264,7 +1407,8 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
     _ce_slice         = [a for a in arbs if a.get("strategy") == "collectively_exhaustive"][:10]
 
     if _complement_slice:
-        _section_header("YES / NO COMPLEMENT", "Buy YES + NO on same market")
+        _section_header("YES / NO COMPLEMENT", "Feed/rounding artifacts — live YNC sum is always ≥ $1.00 structurally")
+        st.caption("YNC not executable on Kalshi (exchange design)")
     for _arb in _complement_slice:
         _ticker = _html.escape(str(_arb.get("ticker", "--")))
         _ya = _arb.get("yes_ask", 0)
@@ -1451,9 +1595,9 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         # Execution instruction (per-card, shown as card footer)
         if _strategy == "yes_no_complement":
             _exec_instr = (
-                f"BUY YES on <strong>{_ticker}</strong> at {_ya*100:.0f}&#162;"
-                f" + BUY NO on <strong>{_ticker}</strong> at {_na*100:.0f}&#162;"
-                f" &nbsp;({(_ya+_na)*100:.0f}&#162; total cost, locked {_ttl})"
+                f"&#9888; <strong>NOT EXECUTABLE</strong> &mdash; YNC is a feed/rounding artifact. "
+                f"Live YES ask + NO ask = {(_ya+_na)*100:.0f}&#162; &ge; 100&#162; structurally; "
+                f"sub-100&#162; quotes reflect WS feed latency, not a real arb."
             )
         elif _is_ce:
             _n_legs_exec = len(_legs) if _legs else "?"
@@ -1692,7 +1836,7 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
             f"<div style='margin-top:3px;'>{_kalshi_link_html}</div>"
             f"</div>"
             f"<div style='text-align:right;'>"
-            f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_edge_col};letter-spacing:-0.01em;'>+{_net:.2f}c</div>"
+            f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_edge_col};letter-spacing:-0.01em;'>+{_net:.2f}¢</div>"
             f"<div style='font-size:0.55rem;color:{TEXT3};font-family:Inter,sans-serif;text-transform:uppercase;'>NET EDGE</div>"
             f"</div>"
             f"</div>"
@@ -1705,8 +1849,8 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 if _strategy == "yes_no_complement" else
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>--</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>--</div></div>"
             ) +
-            f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>GROSS</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_gross:.2f}c</div></div>"
-            f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>FEES</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_fees:.2f}c</div></div>"
+            f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>GROSS</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_gross:.2f}¢</div></div>"
+            f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>FEES</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_fees:.2f}¢</div></div>"
             f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>EXEC QTY</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_exec_str}</div></div>"
             f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>CAPITAL REQ</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_capital_str}</div></div>"
             f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>EXP. P&amp;L</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{GREEN};'>{_pnl_str}</div></div>"
@@ -1720,77 +1864,88 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         st.markdown(_card_html, unsafe_allow_html=True)
         if _scan_idx_caption:
             st.caption(_scan_idx_caption)
-        # -- Execution checklist per complement arb card
+        # -- Execution checklist (suppressed for YNC — feed artifacts, not executable)
         try:
-            _arb_id_key = (
-                str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:30]
-                + "_" + str(_arb.get("strategy", "ync"))[:6]
-            )
-            _net_ync  = float(_arb.get("net_edge_cents", 0))
-            _ya_c_ync = float(_arb.get("yes_ask", 0)) * 100
-            _na_c_ync = float(_arb.get("no_ask", 0)) * 100
-            _fee_ync  = float(_arb.get("fees_cents", 0))
-            with st.expander("Execution Checklist", expanded=False):
-                _cb1 = st.checkbox(
-                    f"✅ Verified YES bid ≥ {_ya_c_ync:.0f}¢ still holds (check live feed)",
-                    key=f"check_{_arb_id_key}_1",
+            if _arb.get("strategy") == "yes_no_complement":
+                pass  # YNC cards: artifact warning already shown above; no execution guide
+            else:
+                _arb_id_key = (
+                    str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:30]
+                    + "_" + str(_arb.get("strategy", "ync"))[:6]
                 )
-                _cb2 = st.checkbox(
-                    f"✅ Verified NO bid ≥ {_na_c_ync:.0f}¢ still holds",
-                    key=f"check_{_arb_id_key}_2",
-                )
-                _cb3 = st.checkbox(
-                    f"✅ Calculated net edge ≥ 2¢ after {_fee_ync:.2f}¢ fees per leg",
-                    key=f"check_{_arb_id_key}_3",
-                )
-                _cb4 = st.checkbox(
-                    "✅ Position size within Kelly fraction (see Backtest page)",
-                    key=f"check_{_arb_id_key}_4",
-                )
-                _cb5 = st.checkbox(
-                    "✅ Not already in this position",
-                    key=f"check_{_arb_id_key}_5",
-                )
-                _cb6 = st.checkbox(
-                    "✅ Verified prices in Kalshi UI before executing",
-                    key=f"check_{_arb_id_key}_6",
-                )
-                if _cb1 and _cb2 and _cb3 and _cb4 and _cb5 and _cb6:
-                    _ync_tk2  = str(_arb.get("ticker", "--")).split(" (")[0]
-                    _ync_snippet2 = (
-                        f"# Arb: {_ync_tk2}\n"
-                        f"# Strategy: {str(_arb.get('strategy','ync')).upper()}\n"
-                        f"# Leg 1: BUY YES on {_ync_tk2} @ {_ya_c_ync:.0f}¢\n"
-                        f"# Leg 2: BUY NO on {_ync_tk2} @ {_na_c_ync:.0f}¢\n"
-                        f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                _net_ync  = float(_arb.get("net_edge_cents", 0))
+                _ya_c_ync = float(_arb.get("yes_ask", 0)) * 100
+                _na_c_ync = float(_arb.get("no_ask", 0)) * 100
+                _fee_ync  = float(_arb.get("fees_cents", 0))
+                with st.expander("EXECUTION CHECKLIST", expanded=False):
+                    _cb1 = st.checkbox(
+                        f"✅ Verified YES bid ≥ {_ya_c_ync:.0f}¢ still holds (check live feed)",
+                        key=f"check_{_arb_id_key}_1",
                     )
-                    st.success("\U0001f680 Ready to execute — place orders on Kalshi.com")
-                    st.code(_ync_snippet2, language="bash")
-                else:
-                    st.info("Complete all checks before executing")
+                    _cb2 = st.checkbox(
+                        f"✅ Verified NO bid ≥ {_na_c_ync:.0f}¢ still holds",
+                        key=f"check_{_arb_id_key}_2",
+                    )
+                    _cb3 = st.checkbox(
+                        f"✅ Calculated net edge ≥ 2¢ after {_fee_ync:.2f}¢ fees per leg",
+                        key=f"check_{_arb_id_key}_3",
+                    )
+                    _cb4 = st.checkbox(
+                        "✅ Position size within Kelly fraction (see Backtest page)",
+                        key=f"check_{_arb_id_key}_4",
+                    )
+                    _cb5 = st.checkbox(
+                        "✅ Not already in this position",
+                        key=f"check_{_arb_id_key}_5",
+                    )
+                    _cb6 = st.checkbox(
+                        "✅ Verified prices in Kalshi UI before executing",
+                        key=f"check_{_arb_id_key}_6",
+                    )
+                    if _cb1 and _cb2 and _cb3 and _cb4 and _cb5 and _cb6:
+                        _exec_tk2   = str(_arb.get("ticker", "--")).split(" (")[0]
+                        _exec_strat = str(_arb.get("strategy", "")).lower()
+                        if _exec_strat == "mutually_exclusive":
+                            _legs_me = _arb.get("legs") or []
+                            _legs_str = "\n".join(f"#   BUY NO on {l if isinstance(l, str) else l.get('ticker', str(l))}" for l in _legs_me) if _legs_me else f"#   BUY NO on all legs (see card above)"
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}  [MUTUALLY EXCLUSIVE]\n"
+                                f"# Action: Buy NO on all mutually exclusive legs\n"
+                                f"{_legs_str}\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        elif _exec_strat == "threshold_order":
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}  [THRESHOLD ORDER]\n"
+                                f"# Action: Buy YES on lower-threshold leg + BUY NO on higher-threshold leg\n"
+                                f"# YES ask: {_ya_c_ync:.0f}¢  |  NO ask: {_na_c_ync:.0f}¢\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        elif _exec_strat == "superset":
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}  [SUPERSET]\n"
+                                f"# Action: Buy YES on superset outcome + BUY NO on subset outcome\n"
+                                f"# YES ask: {_ya_c_ync:.0f}¢  |  NO ask: {_na_c_ync:.0f}¢\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        else:
+                            _exec_snippet = (
+                                f"# Arb: {_exec_tk2}\n"
+                                f"# Strategy: {_exec_strat.upper()}\n"
+                                f"# YES ask: {_ya_c_ync:.0f}¢  |  NO ask: {_na_c_ync:.0f}¢\n"
+                                f"# Est. net edge: +{_net_ync:.2f}¢ per contract"
+                            )
+                        st.caption("Ready to execute — place orders on Kalshi.com")
+                        st.code(_exec_snippet, language="bash")
+                    else:
+                        st.caption("COMPLETE ALL CHECKS BEFORE EXECUTING")
         except Exception:
             pass
-        # -- Copy-ready execution summary (YNC only, shown outside checklist when not all checked)
-        if _strategy == "yes_no_complement":
-            try:
-                _ync_tk   = str(_arb.get("ticker", "--")).split(" (")[0]
-                _ync_ya_c = float(_arb.get("yes_ask", 0)) * 100
-                _ync_na_c = float(_arb.get("no_ask", 0)) * 100
-                _ync_net  = float(_arb.get("net_edge_cents", 0))
-                _ync_snippet = (
-                    f"# Arb: {_ync_tk}\n"
-                    f"# Strategy: YNC\n"
-                    f"# Leg 1: BUY YES on {_ync_tk} @ {_ync_ya_c:.0f}¢\n"
-                    f"# Leg 2: BUY NO on {_ync_tk} @ {_ync_na_c:.0f}¢\n"
-                    f"# Est. net edge: +{_ync_net:.2f}¢ per contract"
-                )
-                st.code(_ync_snippet, language="bash")
-            except Exception:
-                pass
+        # YNC execution snippet suppressed — YNC detections are feed artifacts, not executable
 
     # -- CE arb cards
     if _ce_slice:
-        _section_header("COLLECTIVELY EXHAUSTIVE", "Buy YES on all legs")
+        _section_header("COLLECTIVELY EXHAUSTIVE", "CE/ME/TH scanner active — live CE detection enabled")
         for _arb in _ce_slice:
             _ticker = _html.escape(str(_arb.get("ticker", "--")))
             _ya = _arb.get("yes_ask", 0)
@@ -1950,14 +2105,14 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 f"<div style='margin-top:3px;'>{_ce_kalshi_link}</div>"
                 f"</div>"
                 f"<div style='text-align:right;'>"
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_edge_col};'>+{_net:.2f}c</div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_edge_col};'>+{_net:.2f}¢</div>"
                 f"<div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>NET EDGE</div>"
                 f"</div></div>"
                 f"<div style='display:grid;grid-template-columns:repeat(8,1fr);gap:0.4rem;'>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>SUM YES ASK</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{RED};'>{_ya:.4f}</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>TOTAL OUTLAY</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_ya*100:.1f}¢</div></div>"
-                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>GROSS</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_gross:.2f}c</div></div>"
-                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>FEES</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_fees:.2f}c</div></div>"
+                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>GROSS</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_gross:.2f}¢</div></div>"
+                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>FEES</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_fees:.2f}¢</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>EXEC QTY</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_exec_str}</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>CAPITAL REQ</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_capital_str}</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>EXP. P&amp;L</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{GREEN};'>{_pnl_str}</div></div>"
@@ -2040,17 +2195,7 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                     st.markdown(_legs_html, unsafe_allow_html=True)
             except Exception:
                 pass
-            # -- Execution checklist per CE arb card
-            try:
-                _arb_id_ce = str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:40]
-                _net_ce_chk = float(_arb.get("net_edge_cents", 0))
-                with st.expander("Execution Checklist", expanded=False):
-                    st.checkbox("✅ Verified both legs are still tradeable", key=f"check_{_arb_id_ce}_1")
-                    st.checkbox("✅ Order size fits within available quantity", key=f"check_{_arb_id_ce}_2")
-                    st.checkbox(f"✅ Confirmed net edge after fees: +{_net_ce_chk:.2f}¢", key=f"check_{_arb_id_ce}_3")
-                    st.checkbox("✅ Verified prices in Kalshi UI before executing", key=f"check_{_arb_id_ce}_4")
-            except Exception:
-                pass
+            st.caption("CE scanner active — auto-detected")
 
     # -- ME / TH / SS arb cards
     import time as _time_mod3
@@ -2205,19 +2350,19 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 f"<div style='display:flex;align-items:center;gap:0.4rem;margin-bottom:2px;'>"
                 f"{_badge_oth_html}"
                 f"<div style='font-size:0.6rem;color:{border_col};font-family:Inter,sans-serif;"
-                f"letter-spacing:0.1em;text-transform:uppercase;'>{_strategy_oth.replace('_',' ').upper()}</div>"
+                f"letter-spacing:0.1em;text-transform:uppercase;'>{ {'mutually_exclusive':'ME','threshold_order':'TH','yes_no_complement':'YNC','collectively_exhaustive':'CE','superset':'SS'}.get(str(_strategy_oth).lower(), str(_strategy_oth).upper()[:6]) }</div>"
                 f"</div>"
                 f"<div style='font-family:JetBrains Mono,monospace;font-size:0.78rem;color:{TEXT};'>{_ticker}</div>"
                 f"{_age_meta_oth}"
                 f"</div>"
                 f"<div style='text-align:right;'>"
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_edge_col};'>+{_net:.2f}c</div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_edge_col};'>+{_net:.2f}¢</div>"
                 f"<div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>NET EDGE</div>"
                 f"</div></div>"
                 f"<div style='display:grid;grid-template-columns:repeat(6,1fr);gap:0.4rem;'>"
-                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>GROSS</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_gross:.2f}c</div></div>"
-                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>FEES</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_fees:.2f}c</div></div>"
-                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>NET EDGE</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{_edge_col};'>+{_net:.2f}c</div></div>"
+                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>GROSS</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_gross:.2f}¢</div></div>"
+                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>FEES</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_fees:.2f}¢</div></div>"
+                f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>NET EDGE</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{_edge_col};'>+{_net:.2f}¢</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>EXEC QTY</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_exec_str}</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>CAPITAL</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_capital_str}</div></div>"
                 f"<div><div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>LOCKED FOR</div><div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_ttl}</div></div>"
@@ -2228,14 +2373,11 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
             )
             st.markdown(_card_oth_html, unsafe_allow_html=True)
             if _strategy_oth == "superset":
-                st.caption(
-                    "Superset arb: broader market price must dominate narrower market price. "
-                    "When the superset contract trades below the subset contract, a price violation exists."
-                )
+                st.caption("Superset arb: broader market must dominate narrower · violation when superset trades below subset")
             try:
                 _arb_id_oth = str(_arb.get("ticker", "")).replace(" ", "_").replace("(", "").replace(")", "")[:40]
                 _net_oth = float(_arb.get("net_edge_cents", 0))
-                with st.expander("Execution Checklist", expanded=False):
+                with st.expander("EXECUTION CHECKLIST", expanded=False):
                     st.checkbox("✅ Verified all legs are still tradeable", key=f"check_{_arb_id_oth}_1")
                     st.checkbox(f"✅ Confirmed net edge after fees: +{_net_oth:.2f}¢", key=f"check_{_arb_id_oth}_3")
                     st.checkbox("✅ Verified prices in Kalshi UI before executing", key=f"check_{_arb_id_oth}_4")
@@ -2309,7 +2451,7 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 f"{_ss_age_icon} {_ss_age_label}</div>"
                 f"</div>"
                 f"<div style='text-align:right;'>"
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_ss_edge_col};'>+{_ss_net:.2f}c</div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:1.1rem;color:{_ss_edge_col};'>+{_ss_net:.2f}¢</div>"
                 f"<div style='font-size:0.55rem;color:{TEXT3};text-transform:uppercase;'>NET EDGE</div>"
                 f"</div></div>"
                 # Tickers row
@@ -2330,11 +2472,11 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
                 # Edge metrics row
                 f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:0.4rem;margin-bottom:0.4rem;'>"
                 f"<div><div style='font-size:0.52rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>GROSS EDGE</div>"
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_ss_gross:.2f}c</div></div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_ss_gross:.2f}¢</div></div>"
                 f"<div><div style='font-size:0.52rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>FEES</div>"
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_ss_fees:.2f}c</div></div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{AMBER};'>{_ss_fees:.2f}¢</div></div>"
                 f"<div><div style='font-size:0.52rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>NET EDGE</div>"
-                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{_ss_edge_col};font-weight:700;'>+{_ss_net:.2f}c</div></div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{_ss_edge_col};font-weight:700;'>+{_ss_net:.2f}¢</div></div>"
                 f"<div><div style='font-size:0.52rem;color:{TEXT3};text-transform:uppercase;font-family:Inter,sans-serif;'>OVERLAP</div>"
                 f"<div style='font-family:JetBrains Mono,monospace;font-size:0.72rem;color:{TEXT};'>{_ss_overlap_str}</div></div>"
                 f"</div>"
@@ -2351,7 +2493,7 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
             st.markdown(_ss_card_html, unsafe_allow_html=True)
             try:
                 _ss_arb_id = str(_ss_arb.get("ticker", "")).replace(" ", "_")[:40]
-                with st.expander("Execution Checklist", expanded=False):
+                with st.expander("EXECUTION CHECKLIST", expanded=False):
                     st.checkbox("✅ Verified superset and subset prices still hold", key=f"check_ss_{_ss_arb_id}_1")
                     st.checkbox(f"✅ Confirmed net edge after fees: +{float(_ss_arb.get('net_edge_cents', 0)):.2f}¢", key=f"check_ss_{_ss_arb_id}_2")
                     st.checkbox("✅ Understand superset monotonicity constraint", key=f"check_ss_{_ss_arb_id}_3")
@@ -2371,30 +2513,17 @@ def _render_live_fallback(min_edge_cents: float = 0.0, strategy_filter: str | No
         ))
         fig.update_layout(
             **plotly_dark_layout(
-            title={"text": "NET EDGE DISTRIBUTION (c)", "font": {"size": 10, "color": TEXT3}},
-            height=220, xaxis_title="Net Edge (c)", yaxis_title="Count", bargap=0.05,
+            title={"text": "NET EDGE DISTRIBUTION (¢)", "font": {"size": 10, "color": TEXT3}},
+            height=220, xaxis_title="NET EDGE (¢)", yaxis_title="COUNT", bargap=0.05,
         ))
         st.plotly_chart(fig, use_container_width=True)
+        st.caption("CE/ME/TH arbs only")
 
-    # Strategy info panels
+    # Strategy info panel
     st.markdown("<hr>", unsafe_allow_html=True)
-    for _strat in ["yes_no_complement", "collectively_exhaustive",
-                   "mutually_exclusive", "superset", "threshold_order"]:
-        _relationship_panel(_strat)
-        st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
+    _relationship_panel("yes_no_complement")
 
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {BLUE};
-padding:0.75rem 1rem;border-radius:3px;margin-top:1rem;'>
-<div style='font-size:0.62rem;letter-spacing:0.08em;color:{BLUE};
-text-transform:uppercase;margin-bottom:4px;'>DATA SOURCES</div>
-<div style='font-size:0.7rem;color:{TEXT2};line-height:1.6;'>
-Live complement arb detected from Synthesis WebSocket.
-Relationship data (30k market pairs) loaded from local database.
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption("arbs from Synthesis WebSocket · 30k relationship pairs")
 
 
 def _relationship_panel(strategy: str):
@@ -2402,8 +2531,8 @@ def _relationship_panel(strategy: str):
     descriptions = {
         "yes_no_complement": (
             "YES / NO COMPLEMENT",
-            "P(YES) + P(NO) = 100c for every contract.\n"
-            "Arb exists when YES ask + NO ask < 100c (both sides tradeable simultaneously)."
+            "P(YES) + P(NO) = 100¢ for every contract.\n"
+            "Structurally: live YES ask + NO ask is always ≥ 100¢ (bid-ask spread). Sub-100¢ quotes are feed/rounding artifacts only."
         ),
         "mutually_exclusive": (
             "MUTUALLY EXCLUSIVE",
@@ -2423,7 +2552,8 @@ def _relationship_panel(strategy: str):
         "collectively_exhaustive": (
             "COLLECTIVELY EXHAUSTIVE",
             "The set of outcomes covers all possible results — exactly one must occur.\n"
-            "Arb exists when the sum of YES asks < 100c (can buy all outcomes cheaply)."
+            "Arb condition: sum of YES asks < 100¢ (can buy all outcomes cheaply).\n"
+            "CE scanner active — arbs auto-detected via Gate 0 series classification."
         ),
         "superset": (
             "SUPERSET RELATIONSHIP",
@@ -2451,3 +2581,4 @@ white-space:pre-line;'>
 </div>""",
         unsafe_allow_html=True,
     )
+

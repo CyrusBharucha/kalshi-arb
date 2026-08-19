@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_l2book_depth_summary.py
 =====================================
 Unit tests for L2Book.depth(), L2Book.summary(), L2Cache.stats()

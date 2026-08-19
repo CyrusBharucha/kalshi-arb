@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_l2_snapshot_writer.py
 =================================
 Unit tests for data/l2_snapshot_writer.py:

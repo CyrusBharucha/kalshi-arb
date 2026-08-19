@@ -8,32 +8,46 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-GREEN = "#22c55e"
-AMBER = "#f59e0b"
-RED   = "#ef4444"
-BLUE  = "#3b82f6"
-TEXT3 = "#64748b"
+from dashboard.styles import GREEN, AMBER, RED, BLUE, TEXT3
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def _load_classifications() -> pd.DataFrame:
+    _query = """
+        SELECT series_prefix, market_type, ce_eligible, me_eligible,
+               status, auto_reason, title_example, market_count,
+               classified_by, first_seen_at, last_seen_at
+        FROM event_series_classifications
+        ORDER BY last_seen_at DESC
+    """
+    # Try primary analytics engine first
     try:
-        from dashboard.db import get_db_conn
-        conn = get_db_conn()
-        if conn is None:
-            return pd.DataFrame()
-        with conn.cursor() as c:
-            c.execute("""
-                SELECT series_prefix, market_type, ce_eligible, me_eligible,
-                       status, auto_reason, title_example, market_count,
-                       classified_by, first_seen_at, last_seen_at
-                FROM event_series_classifications
-                ORDER BY last_seen_at DESC
-            """)
-            cols = [d[0] for d in c.description]
-            return pd.DataFrame(c.fetchall(), columns=cols)
+        from database.repository import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text(_query))
+            rows = result.fetchall()
+            cols = list(result.keys())
+        if rows:
+            return pd.DataFrame(rows, columns=cols)
     except Exception:
-        return pd.DataFrame()
+        pass
+    # Fallback: try Neon via live_arb_store connection (same DATABASE_URL)
+    try:
+        from dashboard.neon_utils import get_neon_engine as _gne_p11a
+        from sqlalchemy import text as _text
+        _engine = _gne_p11a()
+        if _engine is not None:
+            with _engine.connect() as _conn:
+                _result = _conn.execute(_text(_query))
+                _rows = _result.fetchall()
+                _cols = list(_result.keys())
+            if _rows:
+                return pd.DataFrame(_rows, columns=_cols)
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 
 def _ce_dot(v: bool) -> str:
@@ -46,6 +60,7 @@ def _me_dot(v: bool) -> str:
 
 def _type_pill(t: str) -> str:
     colors = {
+        "threshold_numeric":   GREEN,   # CE-eligible: KXBOC, KXFEDDECISION, INXU, etc.
         "binary_race":         GREEN,
         "multi_race_closed":   GREEN,
         "price_range_bins":    GREEN,
@@ -71,18 +86,60 @@ def _type_pill(t: str) -> str:
 def render():
     st.markdown(
         "<div style='font-size:1rem;font-weight:600;letter-spacing:0.06em;"
-        "text-transform:uppercase;margin-bottom:0.4rem;'>Gate 0 — Market Type Classifications</div>"
-        "<p style='font-size:0.72rem;color:#64748b;margin-bottom:1rem;'>"
-        "Every Kalshi event series is classified by market type. CE/ME arb eligibility "
-        "derives from the type. New unseen series are blocked (Gate 0) until classified. "
-        "CE-eligible types: binary_race, tournament_champion, multi_race_closed.</p>",
+        "text-transform:uppercase;margin-bottom:0.4rem;'>GATE 0 — MARKET TYPE CLASSIFICATIONS</div>",
         unsafe_allow_html=True,
     )
+    st.caption("CE/ME eligibility derives from series type · new series blocked until classified · CE-eligible: threshold_numeric (KXBOC, KXFEDDECISION, INXU, …)")
 
     df = _load_classifications()
 
     if df.empty:
-        st.warning("Classification table unavailable — check DB connection.")
+        st.caption("MARKET TYPE CLASSIFICATIONS NOT YET SEEDED")
+        # Show arb-detected series prefixes from Neon as a proxy
+        try:
+            from dashboard.neon_utils import get_neon_engine as _gne_p11b
+            from sqlalchemy import text as _p11_text
+            _eng_p11 = _gne_p11b()
+            if _eng_p11 is not None:
+                with _eng_p11.connect() as _c_p11:
+                    _rows_p11 = _c_p11.execute(_p11_text(
+                        "SELECT SPLIT_PART(ticker, '-', 1) AS prefix, "
+                        "COUNT(*) AS arb_count, "
+                        "AVG(net_edge_cents) AS avg_edge, "
+                        "MAX(net_edge_cents) AS best_edge, "
+                        "string_agg(DISTINCT strategy_type, ', ') AS strategies "
+                        "FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "GROUP BY 1 ORDER BY arb_count DESC"
+                    )).fetchall()
+                if _rows_p11:
+                    st.markdown(
+                        f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                        f"color:{TEXT3};margin:0.75rem 0 0.4rem;'>ARB-DETECTED SERIES (NEON CLOUD)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    import pandas as _pd_p11
+                    _df_p11 = _pd_p11.DataFrame(
+                        _rows_p11,
+                        columns=["SERIES PREFIX", "ARB COUNT", "AVG EDGE", "BEST EDGE", "STRATEGIES"]
+                    )
+                    _STRAT_SHORT_P11 = {
+                        "mutually_exclusive": "ME", "threshold_order": "TH",
+                        "yes_no_complement": "YNC", "collectively_exhaustive": "CE",
+                        "superset": "SS",
+                    }
+                    _df_p11["AVG EDGE"] = _df_p11["AVG EDGE"].apply(lambda v: f"{float(v):.2f}¢" if v else "--")
+                    _df_p11["BEST EDGE"] = _df_p11["BEST EDGE"].apply(lambda v: f"{float(v):.2f}¢" if v else "--")
+                    _df_p11["STRATEGIES"] = _df_p11["STRATEGIES"].apply(
+                        lambda s: " / ".join(
+                            _STRAT_SHORT_P11.get(t.strip(), t.strip().upper()[:4])
+                            for t in str(s).split(",") if t.strip()
+                        ) if s else "--"
+                    )
+                    st.dataframe(_df_p11, use_container_width=True, hide_index=True)
+                    st.caption(f"{len(_rows_p11)} unique series prefixes detected across {sum(r[1] for r in _rows_p11)} Neon arbs")
+        except Exception:
+            pass
         return
 
     total     = len(df)
@@ -108,11 +165,7 @@ def render():
         )
 
     if unclassed > 0:
-        st.warning(
-            f"⚠️ {unclassed} series are UNCLASSIFIED — Gate 0 will block CE/ME arbs for these until classified. "
-            "Run `scripts/classify_event_series.py` to pick up new market types.",
-            icon=None,
-        )
+        st.caption(f"{unclassed} series unclassified — Gate 0 blocks arbs for these until classified")
 
     st.markdown("<div style='margin:0.75rem 0 0.5rem;'></div>", unsafe_allow_html=True)
 
@@ -120,9 +173,9 @@ def render():
     fc1, fc2, fc3 = st.columns([2, 2, 3])
     type_opts   = ["ALL"] + sorted(df["market_type"].dropna().unique().tolist())
     status_opts = ["ALL"] + sorted(df["status"].dropna().unique().tolist())
-    sel_type    = fc1.selectbox("Market type", type_opts, key="p11_type")
-    sel_status  = fc2.selectbox("Status", status_opts, key="p11_status")
-    search      = fc3.text_input("Search prefix / title", "", key="p11_search")
+    sel_type    = fc1.selectbox("MARKET TYPE", type_opts, key="p11_type")
+    sel_status  = fc2.selectbox("STATUS", status_opts, key="p11_status")
+    search      = fc3.text_input("SEARCH", "", key="p11_search", placeholder="prefix or title…")
 
     fdf = df.copy()
     if sel_type   != "ALL": fdf = fdf[fdf["market_type"] == sel_type]
@@ -185,12 +238,12 @@ def render():
     )
 
     if len(fdf) > 500:
-        st.caption(f"Showing first 500 of {len(fdf):,}. Use filters to narrow.")
+        st.caption(f"Showing first 500 of {len(fdf):,} · use filters to narrow")
 
     # Type breakdown
     st.markdown(
         "<div style='margin:1.5rem 0 0.5rem;font-size:0.72rem;font-weight:600;"
-        "letter-spacing:0.06em;text-transform:uppercase;color:#94A3B8;'>Type Breakdown</div>",
+        "letter-spacing:0.06em;text-transform:uppercase;color:#94A3B8;'>TYPE BREAKDOWN</div>",
         unsafe_allow_html=True,
     )
     breakdown = (
@@ -200,3 +253,4 @@ def render():
         .sort_values("count", ascending=False)
     )
     st.dataframe(breakdown, use_container_width=True, hide_index=True)
+

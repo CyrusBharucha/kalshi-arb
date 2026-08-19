@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/nested_contracts.py
 Strategy 3: Nested / Logical Contract Violations
 

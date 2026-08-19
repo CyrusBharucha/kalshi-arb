@@ -9,9 +9,9 @@ from dashboard.styles import GREEN, RED, AMBER, BLUE, TEXT, TEXT2, TEXT3, PANEL,
 
 
 _CATEGORIES = [
-    "All", "Elections", "Crypto", "Sports", "Finance/Markets",
-    "Weather", "Bank of Canada", "Canadian Dollar", "Commodities",
-    "Politics", "Other",
+    "All", "ELECTIONS", "CRYPTO", "SPORTS", "FINANCE/MARKETS",
+    "WEATHER", "Bank of Canada", "Canadian Dollar", "COMMODITIES",
+    "POLITICS", "OTHER",
 ]
 
 
@@ -30,8 +30,34 @@ MARKET EXPLORER
     _ws_live = _gls().get_stats().get("connected", False)
     _is_sqlite = not _health.get("db_connected", False) and _health.get("db_mode") == "sqlite"
     _db_live = _health.get("db_connected", False)
-    _src_dot = GREEN if _ws_live else (AMBER if _db_live else "#6B7280")
-    _src_txt = "LIVE" if _ws_live else ("DB snapshot" if _db_live else "offline")
+    import os as _os_p03
+    _sk_p03 = _os_p03.environ.get("SYNTHESIS_SECRET_KEY", "").strip()
+    if not _sk_p03:
+        try:
+            _sk_p03 = (st.secrets.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+        except Exception:
+            pass
+    if not _sk_p03:
+        try:
+            for _ns_p03 in st.secrets.values():
+                if hasattr(_ns_p03, "get"):
+                    _sk_p03 = (_ns_p03.get("SYNTHESIS_SECRET_KEY", "") or "").strip()
+                    if _sk_p03:
+                        break
+        except Exception:
+            pass
+    _has_key_p03 = bool(_sk_p03)
+    # Check Neon state for source label
+    from dashboard.neon_utils import is_neon_connected as _is_neon_p03
+    _p03_neon_ok = _is_neon_p03()
+    if _ws_live:
+        _src_dot, _src_txt = GREEN, "LIVE"
+    elif _db_live or _p03_neon_ok:
+        _src_dot, _src_txt = GREEN, "CLOUD"
+    elif _has_key_p03:
+        _src_dot, _src_txt = AMBER, "↻ CONNECTING"
+    else:
+        _src_dot, _src_txt = "#6B7280", "offline"
     st.markdown(
         f"<div style='font-size:0.62rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
         f"margin-bottom:0.5rem;'><span style='color:{_src_dot};'>●</span> {_src_txt}</div>",
@@ -49,10 +75,10 @@ MARKET EXPLORER
             else f"{_age_secs // 60}m {_age_secs % 60}s" if _age_secs >= 60
             else f"{_age_secs}s"
         )
-        if st.button("🔄 Refresh quotes", key="p03_refresh"):
+        if st.button("REFRESH QUOTES", key="p03_refresh"):
             st.session_state["p03_last_render_ts"] = _time.time()
             st.rerun()
-        st.caption(f"Last refreshed: {_age_label} ago")
+        st.caption(f"LAST REFRESHED: {_age_label} AGO")
     except Exception:
         pass
 
@@ -90,33 +116,32 @@ MARKET EXPLORER
         canadian = st.checkbox("CANADIAN ONLY", value=False, key="p03_canadian")
 
     with f4:
-        has_arb = st.checkbox("ARB ONLY", value=False, key="p03_has_arb")
+        has_arb = st.checkbox("DETECTED ONLY", value=False, key="p03_has_arb")
 
     with f5:
         min_vol = st.number_input("MIN VOLUME", value=0, step=100, min_value=0, key="p03_min_vol")
 
-    # --- Category prefix filter pills -----
-    try:
-        _cat_df_tmp, _ = get_open_markets(limit=10000)
-        if not _cat_df_tmp.empty and "ticker" in _cat_df_tmp.columns:
-            _prefixes = _cat_df_tmp["ticker"].dropna().apply(lambda t: str(t).split("-")[0]).unique()
-            sorted_prefixes = sorted(set(_prefixes))
-        else:
-            sorted_prefixes = []
-        _selected_cats = st.multiselect(
-            "Event categories", options=sorted_prefixes, default=[], key="p03_cat_filter"
-        )
-    except Exception:
-        _selected_cats = []
-        sorted_prefixes = []
-
-    # --- Load -----
+    # --- Load (single call — prefixes derived from result below) -----
     df, err = get_open_markets(
         category_filter=cat_arg,
         canadian_only=canadian,
         min_volume=float(min_vol),
         limit=10000,
     )
+
+    # --- Category prefix filter pills (derived from loaded data) -----
+    try:
+        if not df.empty and "ticker" in df.columns:
+            _prefixes = df["ticker"].dropna().apply(lambda t: str(t).split("-")[0]).unique()
+            sorted_prefixes = sorted(set(_prefixes))
+        else:
+            sorted_prefixes = []
+        _selected_cats = st.multiselect(
+            "EVENT CATEGORIES", options=sorted_prefixes, default=[], key="p03_cat_filter"
+        )
+    except Exception:
+        _selected_cats = []
+        sorted_prefixes = []
 
     if err and df.empty:
         # Fallback: show live WS markets
@@ -147,20 +172,84 @@ MARKET EXPLORER
                 live_df = pd.DataFrame(rows).sort_values("spread")
                 st.metric("LIVE MARKETS", f"{len(live_df):,}")
                 st.dataframe(live_df, use_container_width=True, height=600, hide_index=True)
-                st.caption("Live data from Synthesis WebSocket. Full market details require PostgreSQL.")
+                st.caption("LIVE DATA FROM SYNTHESIS WEBSOCKET · FULL DETAILS WHEN NEON CONNECTED")
                 return
 
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1rem;
-border-radius:3px;color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;'>
-DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
-</div>""",
-            unsafe_allow_html=True,
-        )
+        # Check if Neon is reachable — direct row count is most reliable
+        _neon_ok_p03 = False
+        try:
+            from dashboard.data_layer import get_live_arbs_cloud_stats as _p03_neon_probe
+            if (_p03_neon_probe().get("total_count", 0) or 0) > 0:
+                _neon_ok_p03 = True
+        except Exception:
+            pass
+        if not _neon_ok_p03:
+            from dashboard.neon_utils import is_neon_connected as _is_neon_p03b
+            _neon_ok_p03 = _is_neon_p03b()
+        if _neon_ok_p03:
+            # Show recent arb tickers from Neon as proxy for active markets
+            try:
+                import dashboard.live_arb_store as _las_p03b
+                from sqlalchemy import text as _p03_text
+                _p03_eng = getattr(_las_p03b, "_pg_engine", None) or _las_p03b.get_pg_engine_cached()
+                if _p03_eng is not None:
+                    with _p03_eng.connect() as _p03_c:
+                        _p03_rows = _p03_c.execute(_p03_text(
+                            "SELECT ticker, MAX(detected_at) AS last_seen, "
+                            "MAX(net_edge_cents) AS best_edge, "
+                            "string_agg(DISTINCT strategy_type, ', ') AS strategies "
+                            "FROM live_arbs_cloud "
+                            "WHERE strategy_type NOT IN ('yes_no_complement') "
+                            "GROUP BY ticker ORDER BY last_seen DESC LIMIT 20"
+                        )).fetchall()
+                    if _p03_rows:
+                        st.markdown(
+                            f"<div style='font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;"
+                            f"color:{TEXT3};margin-bottom:0.4rem;'>NEON CLOUD — RECENTLY DETECTED ARB MARKETS</div>",
+                            unsafe_allow_html=True,
+                        )
+                        import pandas as _pd_p03
+                        _p03_df = _pd_p03.DataFrame(
+                            _p03_rows, columns=["TICKER", "LAST DETECTED", "BEST EDGE (¢)", "STRATEGIES"]
+                        )
+                        _STRAT_SH_P03 = {
+                            "mutually_exclusive": "ME", "threshold_order": "TH",
+                            "yes_no_complement": "YNC", "collectively_exhaustive": "CE",
+                            "superset": "SS",
+                        }
+                        import time as _p03_time
+                        _now_p03 = _p03_time.time()
+                        def _p03_age(v):
+                            try:
+                                _t = _pd_p03.to_datetime(v, utc=True).timestamp()
+                                _s = _now_p03 - _t
+                                if _s < 3600: return f"{int(_s//60)}m ago"
+                                if _s < 86400: return f"{int(_s//3600)}h ago"
+                                return f"{int(_s//86400)}d ago"
+                            except Exception:
+                                return str(v)[:10] if v else "--"
+                        _p03_df["BEST EDGE (¢)"] = _p03_df["BEST EDGE (¢)"].apply(
+                            lambda v: f"{float(v):.2f}" if v else "--"
+                        )
+                        _p03_df["LAST DETECTED"] = _p03_df["LAST DETECTED"].apply(_p03_age)
+                        _p03_df["STRATEGIES"] = _p03_df["STRATEGIES"].apply(
+                            lambda s: " / ".join(
+                                _STRAT_SH_P03.get(t.strip(), t.strip().upper()[:4])
+                                for t in str(s).split(",") if t.strip()
+                            ) if s else "--"
+                        )
+                        st.dataframe(_p03_df, use_container_width=True, hide_index=True)
+                        st.caption("LIVE DATA REQUIRES SYNTHESIS WEBSOCKET · SHOWING HISTORICAL NEON ARBS AS PROXY")
+                        return
+            except Exception:
+                pass
+            st.caption("MARKETS TABLE EMPTY — CHECK ARB HISTORY FOR RECORDS")
+        else:
+            st.caption("FEED CONNECTING — MARKET QUOTES WILL APPEAR ONCE SYNTHESIS WEBSOCKET IS LIVE")
         return
 
     if df.empty:
-        st.info("No markets match the current filters.")
+        st.caption("NO MARKETS MATCH FILTERS")
         return
 
     # --- Apply local filters -----
@@ -180,7 +269,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 lambda t: any(str(t).startswith(pfx) for pfx in _selected_cats)
             )
             df = df[_cat_mask]
-            st.caption(f"{len(df):,} markets in selected categories")
+            st.caption(f"{len(df):,} MARKETS IN SELECTED CATEGORIES")
     except Exception:
         pass
 
@@ -190,16 +279,16 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
         if _live_q:
             def _ws_bid(t):
                 _q = _live_q.get(t)
-                return f"{_q.yes_bid*100:.0f}c" if _q and _q.yes_bid > 0 else None
+                return f"{_q.yes_bid*100:.0f}¢" if _q and _q.yes_bid > 0 else None
 
             def _ws_ask(t):
                 _q = _live_q.get(t)
-                return f"{_q.yes_ask*100:.0f}c" if _q and _q.yes_ask > 0 else None
+                return f"{_q.yes_ask*100:.0f}¢" if _q and _q.yes_ask > 0 else None
 
             def _ws_spread(t):
                 _q = _live_q.get(t)
                 if _q and _q.yes_bid > 0 and _q.yes_ask > 0:
-                    return f"{(_q.yes_ask - _q.yes_bid)*100:.0f}c"
+                    return f"{(_q.yes_ask - _q.yes_bid)*100:.0f}¢"
                 return None
 
             def _ws_compl_arb(t):
@@ -224,23 +313,19 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
         # Store actual combined value where both legs are available, else None
         df["_compl_arb"] = _combo.where(_ya.notna() & _yb.notna(), None)
 
-    # --- ARB SCORE: max(0, 1 - (yes_ask + no_ask)); positive cents = complement arb profit -----
+    # --- TIGHTNESS SCORE: how close YES+NO_ask is to parity (1.00). Lower = tighter = more arb-proximate.
+    # Score = (complement_sum - 1.0) * 100 in cents of overround. 0 = parity, negative = crossed quotes.
     if "_compl_arb" in df.columns:
         _ca_n = pd.to_numeric(df["_compl_arb"], errors="coerce")
-        df["_arb_score"] = (1.0 - _ca_n).clip(lower=0).where(_ca_n.notna(), None)
+        _overround = (_ca_n - 1.0) * 100
+        df["_arb_score"] = _overround.where(_ca_n.notna(), None)
 
     # --- SORT BY selectbox -----
-    _sort_options = ["ARB SCORE ↓", "VOLUME ↓", "SPREAD ↑", "TICKER A-Z"]
+    _sort_options = ["TIGHTNESS ↑", "VOLUME ↓", "SPREAD ↑", "TICKER A-Z"]
     _sort_by = st.selectbox("SORT BY", _sort_options, key="p03_sort_by", label_visibility="visible")
-    st.caption(
-        "ARB SCORE: max(0, (1.00 − (yes_ask + no_ask)) × 100) expressed in cents. "
-        "A score of +5c means buying both legs costs only 95¢ for a guaranteed $1 payout — "
-        "i.e. a 5¢ risk-free profit before fees. Higher score = larger potential profit. "
-        "Zero means both legs sum to ≥ $1.00 (no complement arb). "
-        "Sorted descending: best arb candidates appear first."
-    )
-    if _sort_by == "ARB SCORE ↓" and "_arb_score" in df.columns:
-        df = df.sort_values("_arb_score", ascending=False, na_position="last")
+    st.caption("TIGHTNESS = (YES_ask + NO_ask − 1) × 100¢ · lower = tighter spread · negative = crossed quotes (arb)")
+    if _sort_by == "TIGHTNESS ↑" and "_arb_score" in df.columns:
+        df = df.sort_values("_arb_score", ascending=True, na_position="last")
     elif _sort_by == "VOLUME ↓" and "volume" in df.columns:
         df = df.sort_values("volume", ascending=False, na_position="last")
     elif _sort_by == "SPREAD ↑" and "spread" in df.columns:
@@ -259,17 +344,17 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
         display = display.drop(columns=[c for c in ["_live_bid", "_live_ask", "_live_spread"] if c in display.columns])
 
     if "yes_bid" in display.columns:
-        display["BID"] = display["yes_bid"].apply(lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--")
+        display["BID"] = display["yes_bid"].apply(lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--")
     if "yes_ask" in display.columns:
-        display["ASK"] = display["yes_ask"].apply(lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--")
+        display["ASK"] = display["yes_ask"].apply(lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--")
     if "spread" in display.columns:
-        display["SPREAD"] = display["spread"].apply(lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--")
+        display["SPREAD"] = display["spread"].apply(lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--")
     if "volume" in display.columns:
         display["VOLUME"] = display["volume"].apply(
             lambda v: f"{int(v):,}" if pd.notna(v) and v else "--"
         )
     if "last_price" in display.columns:
-        display["LAST"] = display["last_price"].apply(lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--")
+        display["LAST"] = display["last_price"].apply(lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--")
     if "close_time" in display.columns:
         _exp = pd.to_datetime(display["close_time"], utc=True, errors="coerce")
         display["EXPIRES"] = _exp.dt.strftime("%Y-%m-%d").where(_exp.notna(), "--")
@@ -282,10 +367,10 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             lambda v: str(int(float(v))) if pd.notna(v) and int(float(v)) > 0 else ""
         )
     if "has_arb" in display.columns:
-        display["ARB"] = display["has_arb"].apply(lambda v: "✓" if v else "")
+        display["DETECTED"] = display["has_arb"].apply(lambda v: "✓" if v else "")
     if "_compl_arb" in display.columns:
         if _ws_live:
-            # WS is live: yes_ask + no_ask from live quotes; < 1.0 means genuine complement arb
+            # WS is live: yes_ask + no_ask from live quotes; < 1.0 is a feed/rounding artifact (YNC not executable)
             def _fmt_compl_arb(v):
                 if v is None or (isinstance(v, float) and pd.isna(v)):
                     return ""
@@ -294,7 +379,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                     return f"✓ {fv:.2f}" if fv < 1.0 else f"{fv:.2f}"
                 except (TypeError, ValueError):
                     return "✓" if v else ""
-            display["COMPL ARB?"] = display["_compl_arb"].apply(_fmt_compl_arb)
+            display["BELOW PARITY?"] = display["_compl_arb"].apply(_fmt_compl_arb)
         else:
             # WS offline: value is yes_ask + (1 - yes_bid) = round-trip bid-ask spread,
             # NOT a complement arb check. Show as-is with no checkmark.
@@ -309,15 +394,17 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
         display = display.drop(columns=["_compl_arb"])
 
     if "_arb_score" in display.columns:
-        def _fmt_arb_score(v):
+        def _fmt_tightness(v):
             if v is None or (isinstance(v, float) and pd.isna(v)):
                 return "--"
             try:
                 fv = float(v)
-                return f"+{fv*100:.1f}c" if fv > 0 else "--"
+                if fv < 0:
+                    return f"{fv:.1f}¢"
+                return f"+{fv:.1f}¢"
             except (TypeError, ValueError):
                 return "--"
-        display["ARB SCORE"] = display["_arb_score"].apply(_fmt_arb_score)
+        display["TIGHTNESS"] = display["_arb_score"].apply(_fmt_tightness)
         display = display.drop(columns=["_arb_score"])
 
     # --- KPI row -----
@@ -344,7 +431,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
     # HAS ARB — use column if present (live DB); derive from arb_opportunities in snapshot
     if "has_arb" in df.columns:
         m4.metric("LIVE ARB", f"{int(df['has_arb'].fillna(False).sum()):,}",
-                  help="Markets with an open arb opportunity in the live database.")
+                  help="MARKETS FLAGGED BY ARB SCANNER")
     elif _is_sqlite:
         _n_arb_markets = 0
         try:
@@ -356,7 +443,8 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             _mc4 = _gsc_m4() if _gsc_m4 is not None else None
             if _mc4:
                 _arb_rows = _mc4.execute(
-                    "SELECT markets_involved FROM arbitrage_opportunities WHERE markets_involved IS NOT NULL"
+                    "SELECT markets_involved FROM arbitrage_opportunities WHERE markets_involved IS NOT NULL "
+                    "AND strategy_type NOT IN ('yes_no_complement')"
                 ).fetchall()
                 _mc4.close()
                 _arb_tickers: set = set()
@@ -376,18 +464,37 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 _n_arb_markets = len(_arb_tickers)
         except Exception:
             pass
-        m4.metric("HIST ARB", f"{_n_arb_markets:,}",
-                  help="Markets appearing in any historical arbitrage opportunity (reference DB).")
+        m4.metric("HIST DETECT", f"{_n_arb_markets:,}",
+                  help="Markets with historical arb detections")
     else:
-        m4.metric("LIVE ARB", "--")
+        # Neon fallback: count distinct tickers in live_arbs_cloud
+        _m4_neon_count = 0
+        try:
+            import dashboard.live_arb_store as _las_m4
+            from sqlalchemy import text as _m4_text
+            _m4_eng = getattr(_las_m4, "_pg_engine", None) or _las_m4.get_pg_engine_cached()
+            if _m4_eng is not None:
+                with _m4_eng.connect() as _m4_c:
+                    _m4_r = _m4_c.execute(_m4_text(
+                        "SELECT COUNT(DISTINCT ticker) FROM live_arbs_cloud "
+                        "WHERE strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0"
+                    )).fetchone()
+                _m4_neon_count = int(_m4_r[0]) if _m4_r else 0
+        except Exception:
+            pass
+        if _m4_neon_count > 0:
+            m4.metric("NEON ARB", f"{_m4_neon_count:,}",
+                      help="DISTINCT TICKERS WITH DETECTED ARBS IN NEON")
+        else:
+            m4.metric("LIVE ARB", "--")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     if _is_sqlite:
         st.markdown(
             f"<div style='font-size:0.65rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
-            f"margin-bottom:0.4rem;'>Live bid/ask/spread available on the ORDER BOOK page. "
-            f"Historical candle data shown below.</div>",
+            f"margin-bottom:0.4rem;'>Live bid/ask/spread on ORDER BOOK page · historical candles below</div>",
             unsafe_allow_html=True,
         )
         # Show candlestick markets as an extra explorer — these are NOT in the markets table
@@ -426,7 +533,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 )
                 st.markdown(
                     f"<div style='font-size:0.62rem;color:{TEXT3};font-family:JetBrains Mono,monospace;'>"
-                    f"Enter any TICKER above in p04 ORDER BOOK to see its price history chart.</div>",
+                    f"Enter any ticker above in ORDER BOOK to see its price history chart</div>",
                     unsafe_allow_html=True,
                 )
         except Exception:
@@ -439,12 +546,12 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
     show_cols = [c for c in
                  ["ticker", "event_ticker", "category", "title",
                   "LIVE BID", "LIVE ASK", "LIVE SPR", "LAST", "BID", "ASK", "SPREAD", "VOLUME",
-                  "ARB SCORE", "RELS", "CA", "ARB", "COMPL ARB?", "ROUND-TRIP COST", "EXPIRES"]
+                  "TIGHTNESS", "RELS", "CA", "DETECTED", "BELOW PARITY?", "ROUND-TRIP COST", "EXPIRES"]
                  if c in display.columns and c not in _db_quote_cols]
 
     # --- Group by selectbox -----
-    _group_by = st.selectbox("Group by", ["None", "Event", "Strategy type"], key="p03_group_by")
-    if _group_by == "Event" and "ticker" in df.columns:
+    _group_by = st.selectbox("GROUP BY", ["NONE", "EVENT", "STRATEGY TYPE"], key="p03_group_by")
+    if _group_by == "EVENT" and "ticker" in df.columns:
         try:
             _grp_df = df.copy()
             _grp_df["_event_group"] = _grp_df["ticker"].apply(
@@ -466,7 +573,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             _summary = _grp_df.groupby("_event_group").agg(_agg).reset_index()
             _rename_map = {"_event_group": "EVENT", "ticker": "MARKET COUNT"}
             if _arb_col:
-                _rename_map[_arb_col] = "AVG ARB SCORE"
+                _rename_map[_arb_col] = "AVG TIGHTNESS"
             if _spread_col:
                 _rename_map[_spread_col] = "BEST SPREAD"
             if _oi_col:
@@ -474,13 +581,13 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             if _ask_col:
                 _rename_map[_ask_col] = "BEST YES ASK"
             _summary = _summary.rename(columns=_rename_map)
-            if "AVG ARB SCORE" in _summary.columns:
-                _summary["AVG ARB SCORE"] = _summary["AVG ARB SCORE"].apply(
-                    lambda v: f"+{float(v)*100:.1f}c" if pd.notna(v) and float(v) > 0 else "--"
+            if "AVG TIGHTNESS" in _summary.columns:
+                _summary["AVG TIGHTNESS"] = _summary["AVG TIGHTNESS"].apply(
+                    lambda v: f"{float(v):.1f}¢" if pd.notna(v) else "--"
                 )
             if "BEST SPREAD" in _summary.columns:
                 _summary["BEST SPREAD"] = _summary["BEST SPREAD"].apply(
-                    lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                    lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
                 )
             if "TOTAL OI" in _summary.columns:
                 _summary["TOTAL OI"] = _summary["TOTAL OI"].apply(
@@ -488,7 +595,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 )
             if "BEST YES ASK" in _summary.columns:
                 _summary["BEST YES ASK"] = _summary["BEST YES ASK"].apply(
-                    lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                    lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
                 )
             _summary = _summary.sort_values("MARKET COUNT", ascending=False)
             st.markdown(
@@ -504,7 +611,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 _most_active_count = int(_summary.iloc[0]["MARKET COUNT"])
                 st.metric("MOST ACTIVE EVENT", f"{_most_active_event}",
                           delta=f"{_most_active_count} markets",
-                          help="Event with the most markets tracked in the current filter")
+                          help="EVENT WITH THE MOST MARKETS TRACKED IN THE CURRENT FILTER")
 
             # --- Markets per event bar chart -----
             try:
@@ -541,7 +648,7 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                 unsafe_allow_html=True,
             )
             _evt_search = st.text_input(
-                "Filter events", placeholder="event name…",
+                "FILTER EVENTS", placeholder="event name…",
                 label_visibility="visible", key="p03_evt_search",
             )
             _summary_filtered = _summary[
@@ -560,12 +667,12 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                         _evt_show = _evt_markets[_evt_cols].copy()
                         if "yes_bid" in _evt_show.columns:
                             _evt_show["YES BID"] = _evt_show["yes_bid"].apply(
-                                lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                                lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
                             )
                             _evt_show = _evt_show.drop(columns=["yes_bid"])
                         if "yes_ask" in _evt_show.columns:
                             _evt_show["YES ASK"] = _evt_show["yes_ask"].apply(
-                                lambda v: f"{float(v)*100:.0f}c" if pd.notna(v) else "--"
+                                lambda v: f"{float(v)*100:.0f}¢" if pd.notna(v) else "--"
                             )
                             _evt_show = _evt_show.drop(columns=["yes_ask"])
                         if "open_interest" in _evt_show.columns:
@@ -578,20 +685,20 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
                         _total_oi_evt = _evt_markets["open_interest"].apply(pd.to_numeric, errors="coerce").sum() if "open_interest" in _evt_markets.columns else None
                         _best_ask_evt = _evt_markets["yes_ask"].apply(pd.to_numeric, errors="coerce").min() if "yes_ask" in _evt_markets.columns else None
                         _oi_str = f"{int(_total_oi_evt):,}" if _total_oi_evt and pd.notna(_total_oi_evt) else "--"
-                        _ask_str = f"{_best_ask_evt*100:.0f}c" if _best_ask_evt and pd.notna(_best_ask_evt) else "--"
-                        st.caption(f"Total OI across legs: {_oi_str} · Best YES ask: {_ask_str}")
+                        _ask_str = f"{_best_ask_evt*100:.0f}¢" if _best_ask_evt and pd.notna(_best_ask_evt) else "--"
+                        st.caption(f"TOTAL OI ACROSS LEGS: {_oi_str} · BEST YES ASK: {_ask_str}")
                         st.dataframe(_evt_show, use_container_width=True,
                                      height=min(300, _evt_count * 35 + 38), hide_index=True)
                     else:
                         _tickers_in_evt = _evt_markets["ticker"].tolist() if "ticker" in _evt_markets.columns else []
                         st.caption(", ".join(str(t) for t in _tickers_in_evt[:20]))
         except Exception:
-            st.caption("Group by Event unavailable for the current data.")
+            st.caption("GROUP BY EVENT UNAVAILABLE FOR THE CURRENT DATA")
 
     _n_shown = len(display)
     _n_total_loaded = len(df)
-    st.caption(f"Showing {_n_shown:,} of {_n_total_loaded:,} markets"
-               + (" (filtered)" if search or has_arb or cat_arg or min_vol > 0 else ""))
+    st.caption(f"SHOWING {_n_shown:,} OF {_n_total_loaded:,} MARKETS"
+               + (" (FILTERED)" if search or has_arb or cat_arg or min_vol > 0 else ""))
 
     _tbl_height = min(600, max(200, _n_shown * 35 + 38))
     _display_renamed = display[show_cols].rename(columns={
@@ -645,10 +752,10 @@ DATABASE UNAVAILABLE &mdash; Waiting for live WebSocket data...
             _as_f = None
         _cmp_rows.append({
             "TICKER": _t,
-            "YES BID": f"{_yb_f*100:.0f}c" if _yb_f is not None else "--",
-            "NO BID": f"{_no_bid_f*100:.0f}c" if _no_bid_f is not None else "--",
+            "YES BID": f"{_yb_f*100:.0f}¢" if _yb_f is not None else "--",
+            "NO BID": f"{_no_bid_f*100:.0f}¢" if _no_bid_f is not None else "--",
             "COMPL SPREAD": round(_compl_sp, 4) if _compl_sp is not None else None,
-            "ARB SCORE": f"+{_as_f*100:.1f}c" if _as_f is not None and _as_f > 0 else "--",
+            "TIGHTNESS": f"{_as_f:.1f}¢" if _as_f is not None else "--",
         })
     if _cmp_rows:
         _cmp_df = pd.DataFrame(_cmp_rows)
@@ -737,59 +844,41 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
     )
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("YES BID",      f"{float(yes_bid)*100:.0f}c" if yes_bid is not None and pd.notna(yes_bid) else "--")
-    c2.metric("YES ASK",      f"{float(yes_ask)*100:.0f}c" if yes_ask is not None and pd.notna(yes_ask) else "--")
-    c3.metric("LAST",         f"{float(last)*100:.0f}c" if last is not None and pd.notna(last) else "--")
+    c1.metric("YES BID",      f"{float(yes_bid)*100:.0f}¢" if yes_bid is not None and pd.notna(yes_bid) else "--")
+    c2.metric("YES ASK",      f"{float(yes_ask)*100:.0f}¢" if yes_ask is not None and pd.notna(yes_ask) else "--")
+    c3.metric("LAST",         f"{float(last)*100:.0f}¢" if last is not None and pd.notna(last) else "--")
     c4.metric("VOLUME",       f"{int(float(vol)):,}" if vol is not None and pd.notna(vol) else "--")
     c5.metric("OPEN INT",     f"{int(float(oi)):,}" if oi is not None and pd.notna(oi) and float(oi) > 0 else "--")
 
-    # --- ARB SCORE for this market -----
+    # --- TIGHTNESS for this market -----
     _det_yb = float(yes_bid) if yes_bid is not None and pd.notna(yes_bid) else None
     _det_ya = float(yes_ask) if yes_ask is not None and pd.notna(yes_ask) else None
-    _det_sp = float(spread) if spread is not None and pd.notna(spread) else None
-    _det_vol = float(vol) if vol is not None and pd.notna(vol) else None
     _det_compl_sp = round(_det_ya + (1.0 - _det_yb), 4) if _det_ya is not None and _det_yb is not None else None
-    _det_arb_score = max(0.0, 1.0 - _det_compl_sp) if _det_compl_sp is not None else None
+    _det_overround = (_det_compl_sp - 1.0) * 100 if _det_compl_sp is not None else None
 
-    # Query historical arbs from DB to boost score
+    # Query historical arbs from DB
     _hist_arb_count = 0
     _hist_avg_edge = None
     try:
-        from dashboard.data_layer import _sqlite_conn as _gsc_det
-        _det_conn = _gsc_det()
-        if _det_conn:
-            _arb_hist_row = _det_conn.execute(
-                """
-                SELECT COUNT(*) as arb_count, AVG(net_edge_cents) as avg_edge
-                FROM arbs
-                WHERE ticker LIKE ?
-                  AND created_at >= datetime('now', '-30 days')
-                """,
-                (f"{ticker}%",),
-            ).fetchone()
-            _det_conn.close()
-            if _arb_hist_row and _arb_hist_row[0]:
-                _hist_arb_count = int(_arb_hist_row[0])
-                _hist_avg_edge = float(_arb_hist_row[1]) if _arb_hist_row[1] is not None else None
+        from dashboard.data_layer import get_ticker_arb_history as _gtah
+        _hist_data = _gtah(ticker)
+        _hist_arb_count = _hist_data.get("count", 0)
+        _hist_avg_edge = _hist_data.get("avg_edge")
     except Exception:
         pass
 
-    # Boost ARB SCORE based on historical arbs
-    _hist_boost = min(20, _hist_arb_count * 2) / 100.0  # convert pts to decimal (same scale as _det_arb_score)
-    _boosted_arb_score = (_det_arb_score or 0.0) + _hist_boost
-
-    _arb_score_str = f"+{_boosted_arb_score*100:.1f}c" if _boosted_arb_score > 0 else "--"
-    st.metric("ARB SCORE", _arb_score_str, help="max(0, 1 - (yes_ask + no_ask)) × 100 + historical arb boost (up to +20pts). Positive = potential complement arb profit in cents.")
-    st.caption("ARB SCORE = complement gap (0-40pts) + volume rank (0-30pts) + spread tightness (0-30pts) · max=100")
+    _tightness_str = f"{_det_overround:.1f}¢" if _det_overround is not None else "--"
+    st.metric("TIGHTNESS", _tightness_str, help="(YES_ask + NO_ask − 1) × 100¢ · lower = tighter · negative = crossed quotes")
+    st.caption(f"Overround: {_tightness_str} · historical detections: {_hist_arb_count:,}")
 
     # Historical Arb Count metric and status message
-    st.metric("Historical Arb Count", f"{_hist_arb_count:,}",
-              help="Number of real arb detections for this ticker in the last 30 days (from arbs table).")
+    st.metric("HISTORICAL DETECTIONS", f"{_hist_arb_count:,}",
+              help="Arb detections for this ticker in the last 30 days")
     if _hist_arb_count > 0:
         _edge_str = f" · avg edge {_hist_avg_edge:.1f}¢" if _hist_avg_edge is not None else ""
-        st.success(f"✅ This market has historically produced real arbs (Based on {_hist_arb_count} historical arbs{_edge_str})")
+        st.caption(f"{_hist_arb_count} HISTORICAL ARB DETECTIONS{_edge_str.upper()} ")
     else:
-        st.info("No arbs detected for this market yet")
+        st.caption("NO DETECTIONS FOR THIS MARKET YET")
 
     # --- Spread Quality Score (bid/ask spread as market tightness proxy) -----
     try:
@@ -799,9 +888,9 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
             _spread_pct = (_mh_ask - _mh_bid) / _mh_ask
             _spread_score = max(0.0, min(1.0, 1.0 - _spread_pct / 0.20))
             _spread_pct_disp = f"{_spread_pct * 100:.1f}%"
-            _spread_label = "Tight" if _spread_score > 0.7 else ("Fair" if _spread_score >= 0.4 else "Wide")
+            _spread_label = "TIGHT" if _spread_score > 0.7 else ("FAIR" if _spread_score >= 0.4 else "WIDE")
             st.metric(
-                "Spread Quality",
+                "SPREAD QUALITY",
                 f"{int(_spread_score * 100)}/100",
                 delta=_spread_label,
                 help=(
@@ -848,7 +937,7 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
                 pass
 
             # OI Trend: rolling session history
-            _oi_trend_label = "➡️ Stable"
+            _oi_trend_label = "stable"
             if _oi_val is not None:
                 _oi_key = f"oi_history_{ticker}"
                 _oi_hist = st.session_state.get(_oi_key, [])
@@ -859,9 +948,9 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
                 if len(_oi_hist) >= 3:
                     _oh3 = _oi_hist[-3:]
                     if _oh3[2] > _oh3[1] > _oh3[0]:
-                        _oi_trend_label = "📈 Rising"
+                        _oi_trend_label = "rising"
                     elif _oh3[2] < _oh3[1] < _oh3[0]:
-                        _oi_trend_label = "📉 Falling"
+                        _oi_trend_label = "falling"
 
             if _oi_val is not None:
                 _oi_max_ref = 10000.0
@@ -872,10 +961,10 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
                 _oi_detail = f"{_oi_pct_of_max}% of reference max (10k)"
                 if _oi_pct_label:
                     _oi_detail += f" · {_oi_pct_label}"
-                st.caption(_oi_detail)
-                st.caption(f"OI Trend: {_oi_trend_label} (last {len(st.session_state.get(f'oi_history_{ticker}', []))} readings)")
+                st.caption(_oi_detail.upper())
+                st.caption(f"OI TREND: {_oi_trend_label.upper()} (LAST {len(st.session_state.get(f'oi_history_{ticker}', []))} READINGS)")
             else:
-                st.caption("Open interest data not available")
+                st.caption("OPEN INTEREST DATA NOT AVAILABLE")
 
             # Liquidity Score: OI + spread + volume → 0-100 (tradability focus)
             try:
@@ -886,13 +975,13 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
                     import math as _math_liq
                     _liq_vol_score = min(30.0, _math_liq.log10(max(1.0, _det_vol)) / 5.0 * 30.0)
                 _liq_total = int(_liq_oi_score + _liq_sp_score + _liq_vol_score)
-                _liq_label = "High" if _liq_total >= 70 else ("Medium" if _liq_total >= 40 else "Low")
+                _liq_label = "HIGH" if _liq_total >= 70 else ("MEDIUM" if _liq_total >= 40 else "LOW")
                 st.metric("LIQUIDITY SCORE", f"{_liq_total}/100", delta=_liq_label,
-                          help="0-100 tradability score: OI weight (40pts) + spread tightness (30pts) + volume (30pts). Higher = easier to trade.")
+                          help="0-100 tradability score: OI (40pts) + spread (30pts) + volume (30pts) · higher = easier to trade")
             except Exception:
                 pass
         except Exception:
-            st.caption("Open interest data not available")
+            st.caption("OPEN INTEREST DATA NOT AVAILABLE")
 
     # ---- RIGHT: Volume metrics -----
     with _vol_col:
@@ -912,22 +1001,22 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
 
                 if len(_vol_hist) >= 2:
                     import pandas as _pd_spark
-                    st.line_chart(_pd_spark.DataFrame({"Volume": _vol_hist}), height=80)
+                    st.line_chart(_pd_spark.DataFrame({"VOLUME": _vol_hist}), height=80)
                     if len(_vol_hist) >= 3:
                         _v3 = _vol_hist[-3:]
                         if _v3[2] > _v3[1] > _v3[0]:
-                            _vol_trend_label = "📈 Rising"
+                            _vol_trend_label = "rising"
                         elif _v3[2] < _v3[1] < _v3[0]:
-                            _vol_trend_label = "📉 Falling"
+                            _vol_trend_label = "falling"
                         else:
-                            _vol_trend_label = "➡️ Stable"
+                            _vol_trend_label = "stable"
                     else:
-                        _vol_trend_label = "➡️ Stable"
-                    st.caption(f"Volume Trend: {_vol_trend_label} (last {len(_vol_hist)} readings this session)")
+                        _vol_trend_label = "stable"
+                    st.caption(f"VOLUME TREND: {_vol_trend_label.upper()} (LAST {len(_vol_hist)} READINGS THIS SESSION)")
         except Exception:
             pass
 
-    with st.expander("Score breakdown", expanded=False):
+    with st.expander("SCORE BREAKDOWN", expanded=False):
         # Build sub-score components
         _breakdown_names: list[str] = []
         _breakdown_vals: list[float] = []
@@ -955,7 +1044,7 @@ def _render_market_detail(df: pd.DataFrame, ticker: str):
         # 3. Liquidity / spread tightness (0-30 pts)
         if _det_sp is not None and _det_sp >= 0:
             _liq_score = max(0.0, 30.0 - _det_sp * 300.0)  # 0¢ spread → 30, 10¢ → 0
-            _breakdown_names.append(f"liquidity_score (spr={_det_sp*100:.1f}c)")
+            _breakdown_names.append(f"liquidity_score (spr={_det_sp*100:.1f}¢)")
             _breakdown_vals.append(round(_liq_score, 1))
         else:
             _breakdown_names.append("liquidity_score (n/a)")
@@ -1015,11 +1104,7 @@ for c in health_components
 </div>""",
         unsafe_allow_html=True,
     )
-    st.caption(
-        "Health score 0–100: BID/ASK present (25 pts) + spread tightness (25 pts: ≤2¢=25, ≤5¢=15, ≤10¢=8) "
-        "+ volume (25 pts: ≥10k=25, ≥1k=15, ≥100=8) + relationship count (15 pts) + live arb flag (10 pts bonus). "
-        "≥70 = healthy (green), 40–69 = moderate (amber), <40 = thin/illiquid (red)."
-    )
+    st.caption("Health 0–100: bid/ask(25) + spread tightness(25) + volume(25) + relationships(15) + arb flag(10) · ≥70 green · 40-69 amber · <40 red")
 
     # --- RELATED MARKETS section -----
     try:
@@ -1044,8 +1129,8 @@ for c in health_components
                         _ryb_f = _rya_f = _rnob_f = _rcompl = None
                     _rel_rows.append({
                         "TICKER": _rt,
-                        "YES BID": f"{_ryb_f*100:.0f}c" if _ryb_f is not None else "--",
-                        "NO BID": f"{_rnob_f*100:.0f}c" if _rnob_f is not None else "--",
+                        "YES BID": f"{_ryb_f*100:.0f}¢" if _ryb_f is not None else "--",
+                        "NO BID": f"{_rnob_f*100:.0f}¢" if _rnob_f is not None else "--",
                         "COMPL COST": _rcompl,
                     })
                 _rel_df = pd.DataFrame(_rel_rows)
@@ -1064,7 +1149,7 @@ for c in health_components
                         unsafe_allow_html=True,
                     )
                     st.dataframe(_rel_final, use_container_width=True, hide_index=True)
-                    st.caption("Other markets in the same event — check for collective exhaustiveness opportunities")
+                    st.caption("Other markets in the same event — CE/ME/TH scanning active")
     except Exception:
         pass
 
@@ -1112,15 +1197,15 @@ Returns (score, [component_labels]).
         sp = float(spread)
         if sp <= 0.02:
             score += 25
-            components.append(f"TIGHT {sp*100:.0f}c")
+            components.append(f"TIGHT {sp*100:.0f}¢")
         elif sp <= 0.05:
             score += 15
-            components.append(f"MODERATE {sp*100:.0f}c")
+            components.append(f"MODERATE {sp*100:.0f}¢")
         elif sp <= 0.10:
             score += 8
-            components.append(f"WIDE {sp*100:.0f}c")
+            components.append(f"WIDE {sp*100:.0f}¢")
         else:
-            components.append(f"V-WIDE {sp*100:.0f}c")
+            components.append(f"V-WIDE {sp*100:.0f}¢")
 
     # 3. Volume (25pts)
     if pd.notna(volume) and volume:
@@ -1149,4 +1234,5 @@ Returns (score, [component_labels]).
         components.append("ARB ACTIVE")
 
     return min(100, score), components
+
 

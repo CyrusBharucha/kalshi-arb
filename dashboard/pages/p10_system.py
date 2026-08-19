@@ -21,6 +21,7 @@ import streamlit as st
 from dashboard.data_layer import (
     get_system_health, get_coverage_stats, get_table_sizes,
     get_data_quality_stats, get_ingestion_log, purge_prefixarbs,
+    get_live_arbs_cloud_count, get_ext_market_daily_stats,
 )
 from dashboard.live_state import get_live_state
 from dashboard.styles import plotly_dark_layout, GREEN, RED, AMBER, BLUE, TEXT, TEXT2, TEXT3, PANEL, BORDER, PANEL2
@@ -35,8 +36,8 @@ SYSTEM MONITOR
     st.markdown("<hr style='margin:0.5rem 0 0.75rem 0;'>", unsafe_allow_html=True)
 
     auto_refresh = st.checkbox(
-        "AUTO REFRESH (10s)", value=False, key="system_auto_refresh",
-        help="Re-runs this page every 10 seconds with fresh DB and WebSocket stats.",
+        "AUTO REFRESH (10s)", value=True, key="system_auto_refresh",
+        help="RE-RUNS THIS PAGE EVERY 10 SECONDS WITH FRESH DB AND WEBSOCKET STATS",
     )
 
     # --- Live data -----
@@ -81,11 +82,19 @@ SYSTEM MONITOR
     except Exception:
         pass
 
+    _gh_link = (
+        f"<a href='https://github.com/CyrusBharucha/kalshi-arb/commit/{_git_hash}' "
+        f"target='_blank' style='color:#94A3B8;text-decoration:none;'>"
+        f"git:{_git_hash}</a>"
+    ) if _git_hash != "--" else "--"
     st.markdown(
         f"<div style='font-family:JetBrains Mono,monospace;font-size:0.65rem;color:{TEXT3};margin-bottom:0.75rem;'>"
         f"Last refresh: {now} &nbsp;·&nbsp; "
-        f"Code on disk: <span style='color:#94A3B8;'>git:{_git_hash}{_git_dirty}</span> "
-        f"<span style='font-size:0.58rem;color:{TEXT3};'>(restart server if hash doesn't match your last deploy)</span>"
+        f"Code on disk: {_gh_link}{_git_dirty} "
+        f"<span style='font-size:0.58rem;color:{TEXT3};'>"
+        f"· <a href='https://github.com/CyrusBharucha/kalshi-arb/commits/master' "
+        f"target='_blank' style='color:{TEXT3};'>history</a> "
+        f"· if hash doesn't match last push, reboot app from share.streamlit.io</span>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -128,13 +137,13 @@ SYSTEM MONITOR
             _ws_uptime_s = None
 
         if connected:
-            _ws_badge_text = "🟢 CONNECTED"
+            _ws_badge_text = "CONNECTED"
             _ws_badge_col = GREEN
         elif ws_stats.get("reconnects", 0) > 0:
-            _ws_badge_text = "🟡 CONNECTING"
+            _ws_badge_text = "CONNECTING"
             _ws_badge_col = AMBER
         else:
-            _ws_badge_text = "🔴 DISCONNECTED"
+            _ws_badge_text = "DISCONNECTED"
             _ws_badge_col = RED
         st.markdown(
             f"<div style='font-size:0.9rem;font-weight:700;color:{_ws_badge_col};"
@@ -193,7 +202,7 @@ SYSTEM MONITOR
                 st.metric(
                     "WS MSG/SEC",
                     f"{float(_live_mps):.1f}",
-                    help="Messages per second from LiveState (rolling average)",
+                    help="MESSAGES PER SECOND FROM LIVESTATE (ROLLING AVERAGE)",
                 )
         except Exception:
             pass
@@ -240,12 +249,23 @@ SYSTEM MONITOR
             _g0_active = False
             _g0_label, _g0_col = "UNKNOWN", AMBER
 
+        # Book-delta age: time since last actual L2 price update (separate from acks/pings)
+        _last_book_ts_p10 = ws_stats.get("last_book_delta_ts", 0) or 0
+        if _last_book_ts_p10 > 0:
+            _book_age_s = int(time.time() - _last_book_ts_p10)
+            _book_delta_str = f"{_book_age_s}s ago"
+            _book_delta_col = AMBER if _book_age_s > 120 else TEXT
+        else:
+            _book_delta_str = "none yet"
+            _book_delta_col = TEXT3
+
         _ws_health_rows = [
-            ("MESSAGES RECEIVED", (f"{ws_stats.get('messages_total', 0):,}", TEXT)),
-            ("MSGS LAST MINUTE",  (f"{_msgs_last_min:,}", TEXT)),
-            ("CONNECTION UPTIME", (_uptime_str_ws, GREEN if connected else TEXT3)),
-            ("LAST MSG (ET)",     (_last_str_et, AMBER if _last_age_ws and _last_age_ws > 10 else TEXT)),
-            ("GATE 0 (CE FILTER)", (_g0_label, _g0_col)),
+            ("MESSAGES RECEIVED",    (f"{ws_stats.get('messages_total', 0):,}", TEXT)),
+            ("MSGS LAST MINUTE",     (f"{_msgs_last_min:,}", TEXT)),
+            ("CONNECTION UPTIME",    (_uptime_str_ws, GREEN if connected else TEXT3)),
+            ("LAST MSG (ET)",        (_last_str_et, AMBER if _last_age_ws and _last_age_ws > 10 else TEXT)),
+            ("LAST BOOK DELTA",      (_book_delta_str, _book_delta_col)),
+            ("GATE 0 (SERIES FILTER)", (_g0_label, _g0_col)),
         ]
         _ws_health_html = f"<div style='background:{PANEL};border:1px solid {BORDER};border-radius:3px;padding:0.4rem 0;'>"
         for _lbl, (_val, _col) in _ws_health_rows:
@@ -261,17 +281,15 @@ SYSTEM MONITOR
 
         # --- WS disconnected >60s alert -----
         if not connected and _last_age_ws is not None and _last_age_ws > 60:
-            st.error("🔴 WebSocket disconnected for >60s — data may be stale")
+            st.error("WebSocket disconnected for >60s — data may be stale")
 
         # --- Gate 0 alert -----
         if not _g0_active:
-            st.warning(
-                "⚠️ **Gate 0 (CE series filter) is loading** — the series classification cache "
-                "has not yet been fetched from the DB. It activates automatically within ~30s "
-                "of the WebSocket scanner starting. CE arbs detected before Gate 0 activates "
-                "may include unclassified series.",
-                icon=None,
-            )
+            _g0_wait = _ws_uptime_s if (_ws_uptime_s is not None and connected) else None
+            if _g0_wait is not None and _g0_wait > 120:
+                st.caption("Gate 0 inactive — Neon DB unreachable or classifications table empty · CE arbs blocked")
+            else:
+                st.caption("Gate 0 loading — activates within ~30s of scanner start")
 
         # --- Message rate sparkline -----
         st.markdown("<br>", unsafe_allow_html=True)
@@ -291,7 +309,7 @@ SYSTEM MONITOR
                     _fig_spark = go.Figure(go.Scatter(
                         y=_hist, mode="lines",
                         line={"color": _spark_color, "width": 1.5},
-                        name="msg/s",
+                        name="MSG/S",
                     ))
                     _fig_spark.update_layout(
                         height=90,
@@ -308,15 +326,32 @@ SYSTEM MONITOR
             pass
 
         # --- Force Reconnect button -----
-        if st.button("🔌 Force Reconnect", key="p10_reconnect"):
+        if st.button("FORCE RECONNECT", key="p10_reconnect"):
             st.session_state["p10_reconnect_requested"] = True
-            st.warning(
-                "Reconnect requested — the WebSocket bridge will reconnect on its next health check cycle (~30s)"
-            )
-        st.caption(
-            "The bridge auto-reconnects every 30s if disconnected; this button simply logs the request "
-            "so it appears in the next health check cycle."
-        )
+            st.caption("Reconnect requested — WebSocket will reconnect on its next health check cycle (~30s)")
+        st.caption("Bridge auto-reconnects every 30s · button queues reconnect for next health check cycle")
+
+        # --- REST Scanner Status ---
+        try:
+            from dashboard.rest_scanner import get_status as _rest_status
+            _rs = _rest_status()
+            if _rs.get("running"):
+                _fast_s = _rs.get("fast_interval_s", 3)
+                _open_n = _rs.get("open_arbs", 0)
+                _hist_n = _rs.get("arb_history_count", 0)
+                st.markdown(
+                    f"**REST SCANNER** · ● ACTIVE · {_rs['scan_count']} scans "
+                    f"(fast={_rs.get('fast_scans', 0)}, broad={_rs.get('broad_scans', 0)}) · "
+                    f"polling every {_fast_s}s · "
+                    f"open: {_open_n} · history: {_hist_n} · "
+                    f"hot events: {_rs.get('hot_events_cached', 0)}"
+                )
+                if _rs.get("last_arbs_count", 0) > 0:
+                    st.success(f"REST scanner found {_rs['last_arbs_count']} arb(s) on last scan!")
+            else:
+                st.caption("REST scanner: not running")
+        except Exception:
+            pass
 
     with col2:
         _section_header("POSTGRESQL DATABASE")
@@ -325,25 +360,86 @@ SYSTEM MONITOR
         db_lat    = health.get("db_latency_ms")
         last_snap = health.get("latest_snapshot_ts")
 
+        # Also check live_arb_store Neon (may be connected even if analytics DB isn't)
+        from dashboard.neon_utils import is_neon_connected as _is_neon_p10
+        _neon_ok_p10 = _is_neon_p10()
+        _neon_pending_p10 = False
+        if not _neon_ok_p10:
+            try:
+                import dashboard.live_arb_store as _las_p10
+                _neon_pending_p10 = getattr(_las_p10, "_pg_last_fail_ts", 0.0) > 0.0
+                if not _neon_pending_p10 and not getattr(_las_p10, "_pg_init_tried", True):
+                    _neon_pending_p10 = True
+            except Exception:
+                pass
+        _effective_db_ok = db_ok or _neon_ok_p10
+
         _pg_markets = int(health.get("markets_total", 0) or 0)
         if db_ok:
-            _pg_status_str = "CONNECTED (empty)" if _pg_markets == 0 else "CONNECTED"
-            _pg_status_col = GREEN if _pg_markets > 0 else AMBER
+            _pg_status_str = "CONNECTED"
+            _pg_status_col = GREEN
+        elif _neon_ok_p10:
+            _pg_status_str = "NEON CLOUD ✓"
+            _pg_status_col = GREEN
+        elif _neon_pending_p10:
+            _pg_status_str = "↻ CONNECTING"
+            _pg_status_col = AMBER
         elif db_sqlite:
             _pg_status_str = "PG UNAVAILABLE → SQLite"
             _pg_status_col = AMBER
         else:
             _pg_status_str = "OFFLINE"
             _pg_status_col = RED
+        # Neon ping latency + arb count (live measurement when Neon connected)
+        _neon_ping_ms: str = "--"
+        _neon_arb_count: str = "--"
+        _neon_last_arb: str = "--"
+        if _neon_ok_p10:
+            try:
+                import dashboard.live_arb_store as _las_p10_ping
+                from sqlalchemy import text as _p10_text
+                import time as _p10_time
+                _p10_eng = getattr(_las_p10_ping, "_pg_engine", None) or _las_p10_ping.get_pg_engine_cached()
+                if _p10_eng is not None:
+                    _t0 = _p10_time.monotonic()
+                    with _p10_eng.connect() as _p10_ping_c:
+                        _p10_r = _p10_ping_c.execute(_p10_text(
+                            "SELECT COUNT(*) FILTER (WHERE strategy_type NOT IN "
+                            "('yes_no_complement') AND net_edge_cents > 0), "
+                            "MAX(detected_at) FILTER (WHERE strategy_type NOT IN "
+                            "('yes_no_complement')) "
+                            "FROM live_arbs_cloud"
+                        )).fetchone()
+                    _neon_ping_ms = f"{(_p10_time.monotonic() - _t0) * 1000:.0f} ms"
+                    if _p10_r:
+                        _neon_arb_count = f"{int(_p10_r[0] or 0):,}"
+                        if _p10_r[1]:
+                            try:
+                                import pandas as _pd_p10_last
+                                _p10_last_t = _pd_p10_last.to_datetime(str(_p10_r[1]), utc=True).timestamp()
+                                _p10_last_s = _p10_time.time() - _p10_last_t
+                                if _p10_last_s < 3600:
+                                    _neon_last_arb = f"{int(_p10_last_s // 60)}m ago"
+                                elif _p10_last_s < 86400:
+                                    _neon_last_arb = f"{int(_p10_last_s // 3600)}h ago"
+                                else:
+                                    _neon_last_arb = f"{int(_p10_last_s // 86400)}d ago"
+                            except Exception:
+                                _neon_last_arb = str(_p10_r[1])[:16].replace("T", " ")
+            except Exception:
+                pass
         rows2 = [
-            ("STATUS",          (_pg_status_str, _pg_status_col)),
-            ("CONN LAT (cold)", (f"{db_lat:.1f} ms" if db_lat else "--", TEXT)),  # TCP + Neon cold-start; 500–2000 ms is normal on Streamlit Cloud
-            ("DATABASE SIZE",   (health.get("db_size_mb", "--") or "--", TEXT)),
-            ("MARKETS",         (f"{_pg_markets:,}", TEXT)),
-            ("EVENTS",          (f"{int(health.get('events_total', 0) or 0):,}", TEXT)),
-            ("TRADES",          (f"{int(health.get('trades_total', 0) or 0):,}", TEXT)),
-            ("RELATIONSHIPS",   (f"{int(health.get('relationships_total', 0) or 0):,}", TEXT)),
-            ("HISTORICAL ARB OPPS", (f"{int(health.get('arb_opportunities_open', 0) or 0):,}", TEXT)),
+            ("STATUS",           (_pg_status_str, _pg_status_col)),
+            ("NEON PING",        (_neon_ping_ms, GREEN if _neon_ok_p10 else TEXT)),
+            ("CONN LAT (cold)",  (f"{db_lat:.1f} ms" if db_lat else "--", TEXT)),  # TCP + Neon cold-start; 500–2000 ms is normal
+            ("NEON ARBS",  (_neon_arb_count, GREEN if _neon_arb_count != "--" else TEXT)),
+            ("LAST NEON ARB",    (_neon_last_arb, TEXT)),
+            ("DATABASE SIZE",    (health.get("db_size_mb", "--") or "--", TEXT)),
+            ("MARKETS",          (f"{_pg_markets:,}", TEXT)),
+            ("EVENTS",           (f"{int(health.get('events_total', 0) or 0):,}", TEXT)),
+            ("TRADES",           (f"{int(health.get('trades_total', 0) or 0):,}", TEXT)),
+            ("RELATIONSHIPS",    (f"{int(health.get('relationships_total', 0) or 0):,}", TEXT)),
+            ("HISTORICAL DETECTIONS", (f"{int(health.get('arb_opportunities_open', 0) or 0):,}", TEXT)),
             ("LATEST L2 SNAPSHOT (UTC)", (str(last_snap)[:19] if last_snap else "--", TEXT)),
         ]
         _stat_panel(rows2)
@@ -365,19 +461,14 @@ SYSTEM MONITOR
             ("LIQUID MARKETS",    (f"{int(coverage.get('markets_liquid') or 0):,}", TEXT)),
             ("CANADIAN MARKETS",  (f"{int(coverage.get('canadian_markets') or 0):,}", TEXT)),
             ("WITH RELATIONSHIPS",(f"{int(coverage.get('markets_with_relationships') or 0):,}", TEXT)),
-            ("WITH ARB",          (f"{int(coverage.get('markets_with_arb') or 0):,}", TEXT)),
+            ("WITH DETECT",        (f"{int(coverage.get('markets_with_arb') or 0):,}", TEXT)),
         ]
         _stat_panel(rows3)
 
     # --- WS disconnected + no-key notice -----
     _synthesis_key_set = bool(__import__("os").environ.get("SYNTHESIS_SECRET_KEY", "").strip())
     if not connected and not _synthesis_key_set:
-        st.warning(
-            "**Live feed is offline** — `SYNTHESIS_SECRET_KEY` is not set, so the WebSocket scanner "
-            "cannot start. The dashboard is showing database data only. "
-            "See ⚙️ **STREAMLIT CLOUD SETUP — Required Secrets** at the bottom of this page for instructions.",
-            icon="⚠️",
-        )
+        st.caption("Live feed offline — SYNTHESIS_SECRET_KEY not set · showing DB data only")
 
     # --- Engine section -----
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -391,6 +482,9 @@ SYSTEM MONITOR
         elif _is_sqlite:
             _scanner_label = "READY"
             _scanner_color = GREEN
+        elif _neon_ok_p10:
+            _scanner_label = "NEON CLOUD"
+            _scanner_color = BLUE
         else:
             _scanner_label = "STOPPED"
             _scanner_color = AMBER
@@ -435,9 +529,34 @@ SYSTEM MONITOR
                     else:
                         _last_arb_str, _last_arb_color = "--", TEXT
                 else:
-                    _last_arb_str, _last_arb_color = "No arbs this session", TEXT
+                    _last_arb_str, _last_arb_color = "NO DETECTIONS THIS SESSION", TEXT
             except Exception:
                 _last_arb_str, _last_arb_color = "--", TEXT
+        # Final fallback: Neon live_arbs_cloud most recent arb
+        if _last_arb_str in ("--", "NO DETECTIONS THIS SESSION"):
+            try:
+                import dashboard.live_arb_store as _las_p10_last
+                from sqlalchemy import text as _p10_last_text
+                _p10_last_eng = getattr(_las_p10_last, "_pg_engine", None) or _las_p10_last.get_pg_engine_cached()
+                if _p10_last_eng is not None:
+                    with _p10_last_eng.connect() as _p10_last_c:
+                        _p10_last_row = _p10_last_c.execute(_p10_last_text(
+                            "SELECT MAX(detected_at) FROM live_arbs_cloud "
+                            "WHERE strategy_type NOT IN ('yes_no_complement')"
+                        )).fetchone()
+                    if _p10_last_row and _p10_last_row[0]:
+                        _p10_last_dt = _p10_last_row[0]
+                        if hasattr(_p10_last_dt, "timestamp"):
+                            _p10_age_s = (datetime.now(timezone.utc) - _p10_last_dt.replace(tzinfo=timezone.utc)).total_seconds()
+                            if _p10_age_s < 3600:
+                                _last_arb_str = f"{int(_p10_age_s / 60)}m ago (Neon)"
+                            elif _p10_age_s < 86400:
+                                _last_arb_str = f"{int(_p10_age_s / 3600)}h ago (Neon)"
+                            else:
+                                _last_arb_str = _p10_last_dt.strftime("%b %-d") + " (Neon)"
+                            _last_arb_color = AMBER
+            except Exception:
+                pass
 
         _funnel = state.get_scanner_funnel()
         if _funnel:
@@ -455,23 +574,9 @@ SYSTEM MONITOR
             _f_blk_grs  = max(0, _f_p_sum - _f_p_gross)
             _f_blk_qnet = max(0, _f_p_gross - _f_p_qnet)
             _ync_line = (
-                f"YNC: {_f_checked} checked"
-                f" | -{_f_blk_mt} min-tick | -{_f_blk_thr} threshold | -{_f_blk_flr} floor"
-                f" | -{_f_blk_sum} sum&ge;1 | -{_f_blk_grs} gross&gt;10c | -{_f_blk_qnet} net&lt;2c"
-                f" | -{_f_blk_ttl} TTL | {_f_p_book} passed"
+                "<span style='color:#888;'>YNC: disabled (not executable on Kalshi)</span>"
             )
-            # CE funnel
-            _ce_p = _funnel.get("ce_passed", 0)
-            _ce_line = (
-                f"CE: -{_funnel.get('ce_blocked_numeric', 0)} numeric"
-                f" | -{_funnel.get('ce_blocked_min_tick', 0)} min-tick"
-                f" | -{_funnel.get('ce_blocked_structural', 0)} structural"
-                f" | -{_funnel.get('ce_blocked_synthesis', 0)} no-synth-group"
-                f" | -{_funnel.get('ce_blocked_full_leg', 0)} partial-leg"
-                f" | -{_funnel.get('ce_blocked_depth', 0)} depth"
-                f" | -{_funnel.get('ce_blocked_ttl', 0)} TTL"
-                f" | {_ce_p} passed"
-            )
+            # CE funnel — shows "active" status; detailed per-event funnel in ws_bridge
             # ME funnel
             _me_p = _funnel.get("me_passed", 0)
             _me_line = (
@@ -489,13 +594,13 @@ SYSTEM MONITOR
                 f"TH: {_funnel.get('th_checked', 0)} checked"
                 f" | -{_funnel.get('th_blocked_floor', 0)} floor"
                 f" | -{_funnel.get('th_blocked_monotonicity', 0)} monotonicity"
-                f" | -{_funnel.get('th_blocked_gross', 0)} gross&gt;10c"
-                f" | -{_funnel.get('th_blocked_net', 0)} net&lt;2c"
+                f" | -{_funnel.get('th_blocked_gross', 0)} gross&gt;10¢"
+                f" | -{_funnel.get('th_blocked_net', 0)} net&lt;2¢"
                 f" | -{_funnel.get('th_blocked_ttl', 0)} TTL"
                 f" | -{_funnel.get('th_blocked_depth', 0)} depth"
                 f" | {_th_p} passed"
             )
-            _funnel_str = f"{_ync_line}<br>{_ce_line}<br>{_me_line}<br>{_th_line} &nbsp;(60-cycle window)"
+            _funnel_str = f"{_me_line}<br>{_th_line}<br>{_ync_line}<br><span style='color:#888;'>CE: active</span> &nbsp;(60-cycle window)"
         else:
             _funnel_str = "--"
 
@@ -515,7 +620,7 @@ SYSTEM MONITOR
             )
             _eff_denom = _eff_passed + _eff_blocked
             _eff_pct = (_eff_passed / _eff_denom * 100) if _eff_denom > 0 else 0.0
-            _eff_str = f"{_eff_pct:.1f}% of scanned &rarr; arb"
+            _eff_str = f"{_eff_pct:.1f}% of scanned &rarr; detection"
             _eff_color = GREEN if _eff_pct > 0 else TEXT3
         else:
             _eff_str = "--"
@@ -524,15 +629,11 @@ SYSTEM MONITOR
         _n_clean = _sess_stats.get("clean", _sess_stats.get("total", 0))
         rows_e = [
             ("SCANNER",              (_scanner_label, _scanner_color)),
-            ("STRATEGY TYPES",       ("YNC only (CE/ME/TH disabled)", TEXT)),
-            ("STRATEGIES",           ("YES/NO &middot; CE &middot; ME &middot; Threshold &middot; Superset", TEXT)),
-            ("RELATIONSHIPS",        (f"{int(health.get('relationships_total', 0) or 0):,} loaded", TEXT)),
-            ("SESSION ARBS FOUND",   (str(_n_session), GREEN if _n_session > 0 else TEXT)),
-            ("&nbsp;&#8627; NON-CE (COMP+ME+THRESH)", (str(_n_comp), TEXT)),
-            ("&nbsp;&#8627; COLL. EXHAUSTIVE",        (str(_n_ce), TEXT)),
-            ("CLEAN ARBS",           (str(_n_clean), GREEN if _n_clean > 0 else TEXT)),
-            ("BEST SESSION EDGE",    (f"+{_best_edge:.2f}c" if _best_edge > 0 else "--", GREEN if _best_edge > 0 else TEXT)),
-            ("LAST ARB DETECTED",    (_last_arb_str, _last_arb_color)),
+            ("STRATEGY",             ("CE + ME + TH active; YNC not executable", TEXT)),
+            ("SESSION DETECTIONS",   (str(_n_session), GREEN if _n_session > 0 else TEXT)),
+            ("CLEAN DETECTIONS",     (str(_n_clean), GREEN if _n_clean > 0 else TEXT)),
+            ("BEST SESSION EDGE",    (f"+{_best_edge:.2f}¢" if _best_edge > 0 else "--", GREEN if _best_edge > 0 else TEXT)),
+            ("LAST DETECTION",       (_last_arb_str, _last_arb_color)),
             ("SCANNER FUNNEL",       (_funnel_str, TEXT2)),
             ("EFFICIENCY",           (_eff_str, _eff_color)),
         ]
@@ -540,6 +641,42 @@ SYSTEM MONITOR
 
         # -- Per-scanner efficiency breakdown table --
         st.markdown("<br>", unsafe_allow_html=True)
+        # -- Live quote sample: verify no_ask is populated --
+        try:
+            _sample_quotes = sorted(
+                [q for q in state.snapshot_all().values()
+                 if q.yes_ask > 0.05 and q.no_ask > 0.05 and q.yes_ask < 0.95],
+                key=lambda q: q.yes_ask + q.no_ask
+            )[:8]
+            if _sample_quotes:
+                st.markdown("<br>", unsafe_allow_html=True)
+                _section_header("LIVE QUOTE SAMPLE (sorted by sum)")
+                _sq_rows = []
+                for _sq in _sample_quotes:
+                    _sum = _sq.yes_ask + _sq.no_ask
+                    _sum_col = GREEN if _sum < 1.0 else (AMBER if _sum < 1.01 else TEXT3)
+                    _derived_no = round(1.0 - _sq.yes_bid, 4) if _sq.yes_bid > 0 else 1.0
+                    _no_gap = round(_sq.no_ask - _derived_no, 4)
+                    _no_src = "native" if abs(_no_gap) > 0.001 else "derived"
+                    _sq_rows.append({
+                        "TICKER": _sq.ticker[:28],
+                        "YES ASK": f"{_sq.yes_ask:.3f}",
+                        "YES BID": f"{_sq.yes_bid:.3f}",
+                        "NO ASK": f"{_sq.no_ask:.3f}",
+                        "IMPL NO": f"{_derived_no:.3f}",
+                        "NO SRC": _no_src,
+                        "SUM": f"{_sum:.3f}",
+                    })
+                import pandas as _pd_sq
+                st.dataframe(_pd_sq.DataFrame(_sq_rows), use_container_width=True, hide_index=True)
+                _crossed = [q for q in _sample_quotes if q.yes_ask + q.no_ask < 1.0]
+                if _crossed:
+                    st.caption(f"{len(_crossed)} markets with crossed quotes (YES_ask + NO_ask < 100¢)")
+                else:
+                    st.caption("All sampled markets: YES_ask + NO_ask ≥ 100¢ — no crossed quotes")
+        except Exception:
+            pass
+
         _section_header("SCANNER EFFICIENCY BREAKDOWN")
         if _funnel:
             # Derive per-scanner scans-run and arbs-found
@@ -572,19 +709,11 @@ SYSTEM MONITOR
             def _hit_pct(found, scans):
                 return f"{found / scans * 100:.2f}%" if scans > 0 else "0.00%"
 
-            # Pull SS arbs from get_arb_counts() — funnel doesn't track SS scans yet
-            try:
-                from dashboard import ws_bridge as _wsb_eff
-                _ss_found = _wsb_eff.get_arb_counts().get("ss", 0)
-            except Exception:
-                _ss_found = 0
-
             _eff_table = pd.DataFrame([
-                {"Scanner": "YNC (YES/NO Complement)", "Scans Run": _ync_scans, "Arbs Found": _ync_found, "Hit Rate %": _hit_pct(_ync_found, _ync_scans)},
-                {"Scanner": "CE (Collective Exhaustive)", "Scans Run": _ce_scans, "Arbs Found": _ce_found, "Hit Rate %": _hit_pct(_ce_found, _ce_scans)},
-                {"Scanner": "ME (Mutual Exclusive)", "Scans Run": _me_scans, "Arbs Found": _me_found, "Hit Rate %": _hit_pct(_me_found, _me_scans)},
-                {"Scanner": "TH (Threshold)", "Scans Run": _th_scans, "Arbs Found": _th_found, "Hit Rate %": _hit_pct(_th_found, _th_scans)},
-                {"Scanner": "SS (Superset)", "Scans Run": "N/A", "Arbs Found": _ss_found, "Hit Rate %": "N/A"},
+                {"SCANNER": "YNC (YES/NO Complement) — disabled (not executable on Kalshi)", "SCANS RUN": 0, "DETECTIONS": 0, "HIT RATE %": "N/A"},
+                {"SCANNER": "CE (Collectively Exhaustive)", "SCANS RUN": _ce_scans, "DETECTIONS": _ce_found, "HIT RATE %": _hit_pct(_ce_found, _ce_scans)},
+                {"SCANNER": "ME (MUTUALLY EXCLUSIVE)", "SCANS RUN": _me_scans, "DETECTIONS": _me_found, "HIT RATE %": _hit_pct(_me_found, _me_scans)},
+                {"SCANNER": "TH (THRESHOLD ORDER)", "SCANS RUN": _th_scans, "DETECTIONS": _th_found, "HIT RATE %": _hit_pct(_th_found, _th_scans)},
             ])
             st.dataframe(_eff_table, use_container_width=True, hide_index=True)
 
@@ -604,7 +733,7 @@ SYSTEM MONITOR
             _section_header("SCANNER STATUS")
             _now_ts = time.time()
             _ws_last_scan_ts = _funnel.get("ws_last_scan_ts", 0) or 0
-            _scanners_list = ["YNC"]
+            _scanners_list = ["CE", "ME", "TH"]  # YNC scanner disabled
             _status_html = f"<div style='background:{PANEL};border:1px solid {BORDER};border-radius:3px;padding:0.4rem 0;'>"
             for _sc_name in _scanners_list:
                 # Use WS last scan ts as proxy; individual per-scanner timestamps not yet tracked
@@ -635,9 +764,9 @@ SYSTEM MONITOR
                 )
             _status_html += "</div>"
             st.markdown(_status_html, unsafe_allow_html=True)
-            st.caption("Status: green = scanner active (last scan ≤60s ago), amber = stale, red = WS disconnected. Per-scanner timestamps share the WS cycle clock.")
+            st.caption("GREEN = ACTIVE (≤60S) · AMBER = STALE · RED = DISCONNECTED")
         else:
-            st.caption("Per-scanner breakdown available when WS connected and first 60-cycle window completes.")
+            st.caption("Per-scanner breakdown available after first 60-cycle window (~60s)")
 
         # -- Scanner health telemetry metrics --
         _sm1, _sm2 = st.columns(2)
@@ -661,9 +790,9 @@ SYSTEM MONITOR
                         _arb_age_str = f"{int(_arb_age / 3600)}h ago"
                 else:
                     _arb_age_str = "never"
-                st.metric("LAST ARB FOUND", _arb_age_str)
+                st.metric("LAST DETECTION", _arb_age_str, help="LAST SCANNER DETECTION")
             except Exception:
-                st.metric("LAST ARB FOUND", "--")
+                st.metric("LAST DETECTION", "--")
 
         # -- Resource monitoring metrics --
         _rm1, _rm2, _rm3 = st.columns(3)
@@ -682,25 +811,25 @@ SYSTEM MONITOR
                 # Sparkline
                 if len(_mem_hist) >= 2:
                     import pandas as _pd_mem
-                    st.caption("Memory trend (last 30 readings)")
+                    st.caption("MEMORY TREND (LAST 30 READINGS)")
                     st.line_chart(_pd_mem.DataFrame({"RSS MB": _mem_hist}), height=80)
                 # Trend indicator
-                _mem_trend_label = "➡️ Stable"
+                _mem_trend_label = "stable"
                 if len(_mem_hist) >= 5:
                     _last5_mem = _mem_hist[-5:]
                     if all(_last5_mem[i] < _last5_mem[i + 1] for i in range(4)):
-                        _mem_trend_label = "📈 Growing"
+                        _mem_trend_label = "growing"
                     elif all(_last5_mem[i] > _last5_mem[i + 1] for i in range(4)):
-                        _mem_trend_label = "📉 Shrinking"
+                        _mem_trend_label = "shrinking"
                 st.caption(f"Memory trend: {_mem_trend_label}")
                 # High-memory alert
                 if _rss_mb > 500:
-                    st.error("⚠️ High memory usage — possible leak, consider restarting")
+                    st.error("High memory usage — possible leak")
                 # Growing-trend warning
                 if len(_mem_hist) >= 5:
                     _last5_chk = _mem_hist[-5:]
                     if all(_last5_chk[i] < _last5_chk[i + 1] for i in range(4)):
-                        st.warning("⚠️ Memory trend increasing — monitor for leak")
+                        st.caption("MEMORY TREND INCREASING")
             except Exception:
                 st.metric("MEMORY (RSS)", "--")
         with _rm2:
@@ -724,16 +853,16 @@ SYSTEM MONITOR
                 st.session_state["queue_depth_history"] = _qdh
                 if len(_qdh) >= 2:
                     import pandas as _pd_qdh
-                    st.caption("Queue Depth (last 30 readings)")
-                    st.line_chart(_pd_qdh.DataFrame({"Queue Depth": _qdh}), height=100)
+                    st.caption("QUEUE DEPTH (LAST 30 READINGS)")
+                    st.line_chart(_pd_qdh.DataFrame({"QUEUE DEPTH": _qdh}), height=100)
                 _peak_qd = max(_qdh) if _qdh else 0
-                st.metric("Peak Queue Depth", str(_peak_qd))
+                st.metric("PEAK QUEUE DEPTH", str(_peak_qd))
                 if _peak_qd > 1000:
-                    st.error("⚠️ Queue backlog")
+                    st.caption("QUEUE BACKLOG")
                 elif _peak_qd > 500:
-                    st.warning("Queue elevated")
+                    st.caption("QUEUE ELEVATED")
                 else:
-                    st.success("Queue healthy")
+                    st.caption("QUEUE HEALTHY")
             except Exception:
                 pass
             try:
@@ -759,14 +888,15 @@ SYSTEM MONITOR
                 if _uptime_h > 0 and _n_session > 0:
                     _arbs_per_hr = _n_session / _uptime_h
                     st.metric(
-                        "ARB RATE",
+                        "DETECTION RATE",
                         f"{_arbs_per_hr:.1f}/hr",
                         delta=f"{_n_session} this session",
+                        help="CE/ME/TH executable arb detections per hour",
                     )
                 else:
-                    st.metric("ARB RATE", "--")
+                    st.metric("DETECTION RATE", "--")
             except Exception:
-                st.metric("ARB RATE", "--")
+                st.metric("DETECTION RATE", "--")
 
         # -- GC Objects and Threads ---
         _gc1, _gc2 = st.columns(2)
@@ -791,17 +921,14 @@ SYSTEM MONITOR
         _up_s = int(_elapsed % 60)
         _uptime_str = f"{_up_h}h {_up_m}m {_up_s}s"
         st.metric("SESSION UPTIME", _uptime_str)
-        st.caption("Session uptime resets on app restart or page refresh")
+        st.caption("SESSION UPTIME RESETS ON APP RESTART OR PAGE REFRESH")
 
         if _eff_str != "--":
-            st.caption(
-                "EFFICIENCY = arbs passed / (passed + TTL-blocked) across all strategy types. "
-                "Expected to be very low — most scan cycles find no actionable mispricing."
-            )
+            st.caption("EFFICIENCY = detections passed / (passed + TTL-blocked)")
         if _funnel_str == "--":
-            st.caption("SCANNER FUNNEL shows '--' until the first 60-cycle window completes (~60 seconds after the scanner starts).")
+            st.caption("Funnel counts populate after first 60-cycle window (~60s)")
 
-        with st.expander("🧹 DATA MAINTENANCE", expanded=False):
+        with st.expander("DATA MAINTENANCE", expanded=False):
             # --- SQLite file info + VACUUM ---
             import os as _os_maint
             from dashboard.data_layer import _SQLITE_PATH as _sq_path
@@ -839,9 +966,9 @@ SYSTEM MONITOR
                             _vc.execute("VACUUM")
                             _vc.close()
                             _new_sz = _sq_path.stat().st_size / 1_048_576
-                            st.success(f"VACUUM complete. dashboard.db is now {_new_sz:.2f} MB.")
+                            st.success(f"VACUUM complete — dashboard.db is now {_new_sz:.2f} MB")
                         else:
-                            st.warning("dashboard.db not found.")
+                            st.caption("DASHBOARD.DB NOT FOUND")
                     except Exception as _ve:
                         st.error(f"VACUUM failed: {_ve}")
             with _vac_col2:
@@ -853,47 +980,74 @@ SYSTEM MONITOR
                             _vc2.execute("VACUUM")
                             _vc2.close()
                             _new_sz2 = _sq_path_live.stat().st_size / 1_048_576
-                            st.success(f"VACUUM complete. live_arbs.db is now {_new_sz2:.2f} MB.")
+                            st.success(f"VACUUM complete — live_arbs.db is now {_new_sz2:.2f} MB")
                         else:
-                            st.warning("live_arbs.db not found.")
+                            st.caption("LIVE_ARBS.DB NOT FOUND")
                     except Exception as _ve2:
                         st.error(f"VACUUM failed: {_ve2}")
 
             st.markdown("---")
-            st.caption(
-                "Pre-fix ghost arbs (net_edge_cents > 50c) were written by an earlier version "
-                "of the arb scanner before a bug fix capped edge values correctly. "
-                "These rows inflate totals in live_arbs_cloud (Neon) and live_arbs (SQLite). "
-                "Use the buttons below to inspect and optionally remove them."
-            )
-            if st.button("Run dry run", key="purge_dryrun"):
+            st.caption("Pre-fix ghost arbs (net_edge_cents > 50¢): written before edge-cap bug fix · inflate Neon + SQLite totals")
+            if st.button("DRY RUN", key="purge_dryrun"):
                 _res = purge_prefixarbs(dry_run=True)
-                _msg = f"Would delete {_res.get('would_delete', 0):,} ghost arb row(s) (net_edge_cents > 50c)."
+                _msg = f"Would delete {_res.get('would_delete', 0):,} ghost arb row(s) (net_edge_cents > 50¢)."
                 if _res.get("pg_error"):
                     _msg += f"  PG error: {_res['pg_error']}"
                 if _res.get("sqlite_error"):
                     _msg += f"  SQLite error: {_res['sqlite_error']}"
-                st.info(_msg)
-            st.warning("⚠️ The button below permanently deletes ghost arb rows from both databases.")
-            if st.button("Purge ghost arbs from DB", key="purge_execute"):
+                st.caption(_msg)
+            st.caption("PERMANENTLY DELETES GHOST ARB ROWS FROM BOTH DATABASES")
+            if st.button("PURGE GHOST ARBS", key="purge_execute"):
                 _res2 = purge_prefixarbs(dry_run=False)
-                _msg2 = f"Deleted {_res2.get('deleted', 0):,} ghost arb row(s) (net_edge_cents > 50c)."
+                _msg2 = f"Deleted {_res2.get('deleted', 0):,} ghost arb row(s) (net_edge_cents > 50¢)"
                 if _res2.get("pg_error"):
-                    _msg2 += f"  PG error: {_res2['pg_error']}"
+                    _msg2 += f" · PG error: {_res2['pg_error']}"
                 if _res2.get("sqlite_error"):
-                    _msg2 += f"  SQLite error: {_res2['sqlite_error']}"
+                    _msg2 += f" · SQLite error: {_res2['sqlite_error']}"
                 st.success(_msg2)
+
+            # --- YNC purge: remove non-executable feed artifact records from Neon ---
+            st.markdown("---")
+            st.markdown("**Purge YNC records from Neon**")
+            st.caption("YNC not executable on Kalshi (exchange design) · button removes historical YNC rows from Neon")
+            if st.button("PURGE YNC RECORDS", key="purge_ync_neon"):
+                try:
+                    import dashboard.live_arb_store as _las_ync
+                    from sqlalchemy import text as _ync_text
+                    _ync_engine = getattr(_las_ync, "_pg_engine", None) or _las_ync.get_pg_engine_cached()
+                    if _ync_engine is not None:
+                        with _ync_engine.connect() as _ync_conn:
+                            _ync_count = _ync_conn.execute(_ync_text(
+                                "SELECT COUNT(*) FROM live_arbs_cloud WHERE strategy_type = 'yes_no_complement'"
+                            )).scalar() or 0
+                            _ync_conn.execute(_ync_text(
+                                "DELETE FROM live_arbs_cloud WHERE strategy_type = 'yes_no_complement'"
+                            ))
+                            _ync_conn.commit()
+                        st.success(f"Deleted {_ync_count:,} YNC records from live_arbs_cloud (Neon)")
+                    else:
+                        st.caption("Neon not connected — nothing to purge")
+                except Exception as _ync_err:
+                    st.error(f"YNC purge failed: {_ync_err}")
 
     with e2:
         if _is_sqlite:
             _section_header("ARCHITECTURE")
             _ws_connected_now = ws_stats.get("connected", False)
-            _ws_line = (
-                f"Synthesis WS &rarr; LiveState (LIVE &mdash; {ws_stats.get('markets_tracked', 0):,} markets)"
-                if _ws_connected_now else
-                "Synthesis WS &rarr; LiveState (offline)"
-            )
-            _neon_line = "Arb Scanner &rarr; live_arbs_cloud (Neon)" if _ws_connected_now else "Arb Scanner (waiting for WS)"
+            _rest_on_p10_arch = False
+            try:
+                from dashboard.rest_scanner import get_status as _rst_p10_arch
+                _rest_on_p10_arch = _rst_p10_arch().get("running", False)
+            except Exception:
+                pass
+            _any_scan_p10 = _ws_connected_now or _rest_on_p10_arch
+            if _ws_connected_now:
+                _ws_line = f"Synthesis WS &rarr; LiveState (LIVE &mdash; {ws_stats.get('markets_tracked', 0):,} markets)"
+            elif _rest_on_p10_arch:
+                _ws_line = "REST Scanner &rarr; LiveState (LIVE &mdash; polling every 3s)"
+            else:
+                _ws_line = "Synthesis WS &rarr; LiveState (offline)"
+            _neon_line = "Arb Scanner &rarr; live_arbs_cloud (Neon)" if _any_scan_p10 else "ARB SCANNER (STARTING…)"
             st.markdown(
                 f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:0.75rem 1rem;
 border-radius:3px;font-family:JetBrains Mono,monospace;font-size:0.7rem;
@@ -916,68 +1070,147 @@ color:{TEXT2};line-height:1.8;'>
 <span style='color:{TEXT3};'>// Data feed</span><br>
 Synthesis WebSocket &rarr; LiveState singleton (thread-safe, ~3,400 msg/s)<br><br>
 <span style='color:{TEXT3};'>// Arbitrage detection</span><br>
-CE &middot; Complement &middot; Threshold &middot; Superset strategies<br>
+YNC: buy YES+NO when sum &lt; 1.00 — disabled (Kalshi exchange ensures sum &ge; 1.00 by design)<br>
+CE: buy all YES legs of an event when sum &lt; 1.00 (collectively exhaustive set) — <span style='color:{GREEN};'>active</span><br>
+ME: buy all NO legs of an event when sum &lt; N−1 (mutually exclusive set) — <span style='color:{GREEN};'>active</span><br>
+TH: buy YES(superset) + NO(subset) when threshold legs are mispriced — <span style='color:{GREEN};'>active</span><br>
+<span style='color:{TEXT3};'>Kalshi YES/NO are complements — YNC sum &ge; 1.0 always by exchange design · CE/ME/TH scanners active</span><br>
 Dual-write: SQLite (local) + Neon PostgreSQL (cloud)<br><br>
 <span style='color:{TEXT3};'>// Dashboard</span><br>
-Streamlit Cloud &mdash; 10 pages &mdash; auto-refresh 10s
+Streamlit Cloud &mdash; 11 pages &mdash; auto-refresh 10s
 </div>""",
                 unsafe_allow_html=True,
             )
 
-    # --- Database row counts (SQLite) -----
+    # --- Database row counts (Neon primary / SQLite fallback) -----
     st.markdown("<hr>", unsafe_allow_html=True)
     _section_header("DATABASE STATUS")
+    # Try Neon first (primary on Streamlit Cloud)
+    _p10_db_shown = False
     try:
-        import sqlite3 as _sq3_rc
-        from dashboard.data_layer import _SQLITE_PATH as _rc_path
-        if _rc_path.exists():
-            _rc_conn = _sq3_rc.connect(str(_rc_path), check_same_thread=False)
-            _rc_tables = [
-                r[0] for r in _rc_conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
+        import dashboard.live_arb_store as _las_p10_rc
+        from sqlalchemy import text as _p10_rc_text
+        _p10_rc_eng = (
+            getattr(_las_p10_rc, "_pg_engine", None)
+            or _las_p10_rc.get_pg_engine_cached()
+        )
+        if _p10_rc_eng is not None:
+            _p10_neon_tables = [
+                ("live_arbs_cloud", "NEON ARB RECORDS (CLOUD-PERSISTED)"),
+                ("event_series_classifications", "GATE 0 MARKET TYPE CLASSIFICATIONS"),
             ]
-            _rc_rows = []
-            for _t in _rc_tables:
-                try:
-                    _cnt = _rc_conn.execute(f"SELECT COUNT(*) FROM \"{_t}\"").fetchone()[0]
-                    _rc_rows.append({"TABLE": _t, "ROW COUNT": _cnt})
-                except Exception:
-                    pass
-            _rc_conn.close()
-            if _rc_rows:
-                _rc_df = (
-                    pd.DataFrame(_rc_rows)
-                    .sort_values("ROW COUNT", ascending=False)
-                    .head(10)
-                    .reset_index(drop=True)
+            _p10_neon_rows = []
+            with _p10_rc_eng.connect() as _p10_rc_c:
+                for _tbl, _desc in _p10_neon_tables:
+                    try:
+                        _r = _p10_rc_c.execute(_p10_rc_text(f"SELECT COUNT(*) FROM {_tbl}")).fetchone()
+                        if _r:
+                            _p10_neon_rows.append({"TABLE": _tbl, "ROW COUNT": int(_r[0] or 0), "DESCRIPTION": _desc})
+                    except Exception:
+                        pass
+            if _p10_neon_rows:
+                _p10_neon_df = pd.DataFrame(_p10_neon_rows)
+                _p10_neon_df["ROW COUNT"] = _p10_neon_df["ROW COUNT"].apply(lambda v: f"{int(v):,}")
+                st.markdown(
+                    f"<div style='font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;"
+                    f"color:#22C55E;margin-bottom:0.3rem;'>● NEON POSTGRESQL TABLES</div>",
+                    unsafe_allow_html=True,
                 )
-                _rc_df["ROW COUNT"] = _rc_df["ROW COUNT"].apply(lambda v: f"{int(v):,}")
-                st.dataframe(_rc_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No tables found in SQLite database.")
-        else:
-            st.info("Database unavailable")
+                st.dataframe(_p10_neon_df, use_container_width=True, hide_index=True)
+                _p10_db_shown = True
     except Exception:
-        st.info("Database unavailable")
+        pass
+    # SQLite fallback
+    if not _p10_db_shown:
+        try:
+            import sqlite3 as _sq3_rc
+            from dashboard.data_layer import _SQLITE_PATH as _rc_path
+            if _rc_path.exists():
+                _rc_conn = _sq3_rc.connect(str(_rc_path), check_same_thread=False)
+                _rc_tables = [
+                    r[0] for r in _rc_conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                ]
+                _rc_rows = []
+                for _t in _rc_tables:
+                    try:
+                        _cnt = _rc_conn.execute(f"SELECT COUNT(*) FROM \"{_t}\"").fetchone()[0]
+                        _rc_rows.append({"TABLE": _t, "ROW COUNT": _cnt})
+                    except Exception:
+                        pass
+                _rc_conn.close()
+                if _rc_rows:
+                    _rc_df = (
+                        pd.DataFrame(_rc_rows)
+                        .sort_values("ROW COUNT", ascending=False)
+                        .head(10)
+                        .reset_index(drop=True)
+                    )
+                    _rc_df["ROW COUNT"] = _rc_df["ROW COUNT"].apply(lambda v: f"{int(v):,}")
+                    st.dataframe(_rc_df, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("NO TABLES FOUND IN SQLITE DATABASE")
+            else:
+                st.caption("No local database on Streamlit Cloud — Neon is the primary store")
+        except Exception:
+            st.caption("DATABASE UNAVAILABLE")
 
     # --- Neon PostgreSQL status panel -----
-    try:
-        import sys as _sys_neon, os as _os_neon
-        _sys_neon.path.insert(0, _os_neon.path.dirname(_os_neon.path.dirname(_os_neon.path.abspath(__file__))))
-        from database.repository import get_engine as _get_engine_neon
-        from sqlalchemy import text as _text_neon
-        _neon_eng = _get_engine_neon()
-        with _neon_eng.connect() as _neon_conn:
-            _neon_count = _neon_conn.execute(_text_neon("SELECT COUNT(*) FROM live_arbs_cloud")).scalar()
-        st.metric("NEON PG ROWS", f"{int(_neon_count):,}")
-    except Exception as _neon_err:
-        st.error(f"Neon PostgreSQL unavailable: {_neon_err}")
+    _neon_count_all = get_live_arbs_cloud_count()   # total rows (all strategies incl. YNC)
+    _neon_count_meth = 0  # CE/ME/TH rows
+    # Cache may have warmed with 0 before Neon connected — bypass with direct query
+    if _neon_count_all == 0:
+        try:
+            import dashboard.live_arb_store as _las_p10_cnt
+            from sqlalchemy import text as _p10_cnt_text
+            _p10_cnt_eng = (
+                getattr(_las_p10_cnt, "_pg_engine", None)
+                or _las_p10_cnt.get_pg_engine_cached()
+            )
+            if _p10_cnt_eng is not None:
+                with _p10_cnt_eng.connect() as _p10_cnt_c:
+                    _p10_cnt_r = _p10_cnt_c.execute(_p10_cnt_text(
+                        "SELECT COUNT(*), "
+                        "COUNT(*) FILTER (WHERE strategy_type NOT IN ('yes_no_complement')) "
+                        "FROM live_arbs_cloud"
+                    )).fetchone()
+                if _p10_cnt_r and _p10_cnt_r[0]:
+                    _neon_count_all = int(_p10_cnt_r[0])
+                    _neon_count_meth = int(_p10_cnt_r[1] or 0)
+        except Exception:
+            pass
+    _neon_count = _neon_count_all  # keep for backward compat checks below
+    if _neon_count >= 0:
+        _nc1, _nc2, _nc3, _nc4 = st.columns(4)
+        _nc1.metric("ARBS", f"{_neon_count_meth:,}",
+                    help=f"Executable arbs in live_arbs_cloud (total rows incl. historical YNC: {_neon_count_all:,})")
+        # Pull best/avg edge from Neon for richer display
+        try:
+            import dashboard.live_arb_store as _las_p10b
+            from sqlalchemy import text as _p10_text
+            _p10_eng = getattr(_las_p10b, "_pg_engine", None) or _las_p10b.get_pg_engine_cached()
+            if _p10_eng is not None:
+                with _p10_eng.connect() as _p10_c:
+                    _p10_r = _p10_c.execute(_p10_text(
+                        "SELECT MAX(net_edge_cents), AVG(net_edge_cents), "
+                        "COUNT(*) FILTER (WHERE strategy_type='mutually_exclusive'), "
+                        "COUNT(*) FILTER (WHERE strategy_type='threshold_order') "
+                        "FROM live_arbs_cloud WHERE strategy_type NOT IN ('yes_no_complement')"
+                    )).fetchone()
+                if _p10_r and _p10_r[0] is not None:
+                    _nc2.metric("BEST EDGE", f"{float(_p10_r[0]):.2f}¢")
+                    _nc3.metric("AVG EDGE", f"{float(_p10_r[1]):.2f}¢")
+                    _nc4.metric("ME / TH", f"{int(_p10_r[2])} / {int(_p10_r[3])}")
+        except Exception:
+            pass
+    else:
+        st.error("NEON POSTGRESQL UNAVAILABLE")
 
     # --- DB Connectivity Test button -----
     st.markdown("<hr>", unsafe_allow_html=True)
     _section_header("DB CONNECTIVITY TEST")
-    if st.button("🔌 Test DB Connections", key="p10_test_db_connections"):
+    if st.button("TEST DB CONNECTIONS", key="p10_test_db_connections"):
         import sqlite3 as _sq3_test
         import time as _t_test
         from dashboard.data_layer import _SQLITE_PATH as _sqlite_test_path
@@ -1032,38 +1265,38 @@ Streamlit Cloud &mdash; 10 pages &mdash; auto-refresh 10s
             _sq_ms = _db_test_results["sqlite_ms"]
             _sq_err = _db_test_results["sqlite_err"]
             if _sq_ok:
-                st.success(f"✅ SQLite — {_sq_ms:.1f} ms")
+                st.caption(f"SQLite — {_sq_ms:.1f} ms")
             else:
-                st.error(f"❌ SQLite — {_sq_err}")
+                st.error(f"SQLite — {_sq_err}")
         with _dbt_c2:
             _pg_ok2 = _db_test_results["pg_ok"]
             _pg_ms2 = _db_test_results["pg_ms"]
             _pg_count2 = _db_test_results["pg_count"]
             _pg_err2 = _db_test_results["pg_err"]
             if _pg_ok2:
-                st.success(f"✅ Neon PG — {_pg_ms2:.1f} ms · {_pg_count2:,} rows")
+                st.caption(f"Neon PG — {_pg_ms2:.1f} ms · {_pg_count2:,} rows")
             else:
-                st.error(f"❌ Neon PG — {_pg_err2}")
+                st.error(f"Neon PG — {_pg_err2}")
         if _db_test_ts:
             st.caption(f"Last tested: {_db_test_ts}")
         if not _db_test_results["sqlite_ok"] and not _db_test_results["pg_ok"]:
-            st.error("⚠️ All DB connections failed — system running in memory-only mode")
+            st.error("All DB connections failed — running in memory-only mode")
         elif not _db_test_results["sqlite_ok"] or not _db_test_results["pg_ok"]:
-            st.warning("⚠️ Partial DB connectivity — some persistence features degraded")
+            st.warning("Partial DB connectivity — some persistence features degraded")
 
     # --- Table sizes -----
     st.markdown("<hr>", unsafe_allow_html=True)
     _section_header("STORAGE USAGE")
 
     _TABLE_DESCRIPTIONS = {
-        "live_arbs_cloud":      "Live arb detections (Neon)",
-        "kalshi_markets":       "Market metadata",
-        "kalshi_events":        "Event metadata",
-        "kalshi_trades":        "Trade history",
-        "kalshi_relationships": "Market relationships (CE/ME/etc.)",
-        "kalshi_arb_opportunities": "Historical arb opportunities",
-        "l2_snapshots":         "Order book snapshots",
-        "ingestion_log":        "Pipeline run history",
+        "live_arbs_cloud":      "Arb detections — CE/ME/TH executable + historical records (Neon)",
+        "kalshi_markets":       "MARKET METADATA",
+        "kalshi_events":        "EVENT METADATA",
+        "kalshi_trades":        "TRADE HISTORY",
+        "kalshi_relationships": "MARKET RELATIONSHIPS (CE/ME/ETC.)",
+        "kalshi_arb_opportunities": "HISTORICAL DETECTIONS (CE/ME/TH EXECUTABLE ARBS)",
+        "l2_snapshots":         "ORDER BOOK SNAPSHOTS",
+        "ingestion_log":        "PIPELINE RUN HISTORY",
         "ext_market_daily":     "External price data (yfinance/BOC)",
     }
 
@@ -1110,12 +1343,7 @@ Streamlit Cloud &mdash; 10 pages &mdash; auto-refresh 10s
             ))
             st.plotly_chart(fig, use_container_width=True)
     else:
-        st.markdown(
-            f"<div style='color:{TEXT3};font-size:0.75rem;font-family:JetBrains Mono,monospace;"
-            f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-            f"No storage data available. Connect to PostgreSQL (set DATABASE_URL) to see table sizes.</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption("No storage data — pg_stat_user_tables empty")
 
     # --- Data quality section -----
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -1125,12 +1353,7 @@ Streamlit Cloud &mdash; 10 pages &mdash; auto-refresh 10s
     dq_err = dq.get("error")
 
     if dq_err:
-        st.markdown(
-            f"<div style='color:{TEXT3};font-size:0.72rem;font-family:JetBrains Mono,monospace;"
-            f"background:{PANEL};border:1px solid {BORDER};padding:0.6rem;border-radius:3px;'>"
-            f"Data quality stats unavailable. Connect to PostgreSQL (set DATABASE_URL) to enable this section.</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption(f"Data quality stats unavailable — {dq_err}")
     else:
         dq1, dq2 = st.columns(2)
 
@@ -1185,18 +1408,11 @@ color:{TEXT3};margin-top:2px;'>
     # --- Performance snapshot -----
     st.markdown("<hr>", unsafe_allow_html=True)
     _section_header("PERFORMANCE BENCHMARKS")
-    st.markdown(
-        f"<div style='font-size:0.7rem;color:{TEXT2};margin-bottom:0.5rem;'>"
-        "Times three key data-layer queries (live arb opportunities, historical arb summary, "
-        "and 7-day rolling trend). Cached results return ~0 ms after the first call; "
-        "cold PostgreSQL connections may show 500&ndash;2000 ms due to Neon wake-up latency."
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    st.caption("Times 3 key DB queries · cached results return ~0ms · Neon cold-start may show 500–2000ms")
     if st.button("RUN BENCHMARKS", help="Execute timing benchmarks for key DB queries (cached results return ~0ms)"):
         _render_performance_panel()
     else:
-        st.caption("Click RUN BENCHMARKS to time key database queries.")
+        st.caption("CLICK RUN BENCHMARKS TO TIME KEY DATABASE QUERIES")
 
     # --- Ingestion job summary -----
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -1243,7 +1459,7 @@ ORDER BY total_rows DESC
                     _fig_jb.update_layout(**plotly_dark_layout(
                         title={"text": "TOTAL ROWS INSERTED BY JOB TYPE", "font": {"size": 10, "color": TEXT3}},
                         height=max(200, len(_jdf) * 35 + 60),
-                        xaxis_title="Rows",
+                        xaxis_title="ROWS",
                         yaxis={"autorange": "reversed", "tickfont": {"size": 9}},
                         margin={"l": 10, "r": 80, "t": 30, "b": 30},
                     ))
@@ -1265,19 +1481,9 @@ ORDER BY total_rows DESC
                         hide_index=True,
                     )
                     _total_rows_all = sum(_jdf["total_rows"])
-                    st.caption(
-                        f"Total: {_total_rows_all:,} rows across {sum(_jdf['runs']):,} runs "
-                        f"({len(_jdf)} job types). A job showing 0 rows inserted means its data was already up to date."
-                    )
+                    st.caption(f"Total: {_total_rows_all:,} rows · {sum(_jdf['runs']):,} runs · {len(_jdf)} job types · 0 rows = already up to date")
     except Exception as _jingest_e:
-        st.markdown(
-            f"<div style='color:{TEXT3};font-size:0.72rem;font-family:JetBrains Mono,monospace;"
-            f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-            f"Ingestion summary unavailable — ingestion_log table not yet populated. "
-            f"Connect the data pipeline to start ingesting historical data."
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption("Ingestion summary unavailable — ingestion_log empty")
 
     # --- Ingestion log -----
     log_df, log_err = get_ingestion_log(limit=50)
@@ -1285,19 +1491,9 @@ ORDER BY total_rows DESC
         st.markdown("<hr>", unsafe_allow_html=True)
         _section_header("INGESTION LOG (LAST 50)")
         if _is_sqlite:
-            st.markdown(
-                f"<div style='color:{TEXT3};font-size:0.72rem;font-family:JetBrains Mono,monospace;"
-                f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-                f"Ingestion log will populate once the data pipeline is connected and running.</div>",
-                unsafe_allow_html=True,
-            )
+            st.caption("NO INGESTION LOG ENTRIES")
         else:
-            st.markdown(
-                f"<div style='color:{TEXT3};font-size:0.72rem;font-family:JetBrains Mono,monospace;"
-                f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-                f"No ingestion log entries found.</div>",
-                unsafe_allow_html=True,
-            )
+            st.caption("NO INGESTION LOG ENTRIES FOUND")
     if not log_df.empty:
         st.markdown("<hr>", unsafe_allow_html=True)
         _section_header("INGESTION LOG (LAST 50)")
@@ -1318,55 +1514,38 @@ ORDER BY total_rows DESC
     # --- External market data status -----
     st.markdown("<hr>", unsafe_allow_html=True)
     _section_header("EXTERNAL MARKET DATA (yfinance + BOC VALET)")
-    try:
-        import sys as _sys, os as _os
-        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-        from database.repository import get_engine as _ge_ext
-        from sqlalchemy import text as _text_ext
-        _eng_ext = _ge_ext()
-        with _eng_ext.connect() as _conn_ext:
-            _ext_r = _conn_ext.execute(_text_ext("""
-SELECT
-COUNT(DISTINCT asset_name) AS n_assets,
-COUNT(*) AS n_rows,
-MIN(obs_date) AS earliest,
-MAX(obs_date) AS latest,
-MAX(fetched_at) AS last_fetch
-FROM ext_market_daily
-""")).fetchone()
-        if _ext_r and _ext_r[0]:
-            _ea1, _ea2, _ea3, _ea4 = st.columns(4)
-            _ea1.metric("ASSETS LOADED", str(_ext_r[0]))
-            _ea2.metric("TOTAL ROWS", f"{int(_ext_r[1]):,}")
-            _ea3.metric("DATE RANGE", f"{str(_ext_r[2])[:10]} → {str(_ext_r[3])[:10]}")
-            _ea4.metric("LAST FETCH", str(_ext_r[4])[:16] if _ext_r[4] else "--")
-        else:
-            st.markdown(
-                f"<div style='color:{AMBER};font-size:0.72rem;font-family:JetBrains Mono,monospace;"
-                f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
-                f"No external market data loaded yet. Connect the cross-asset data pipeline to populate this section."
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-    except Exception:
-        st.info("External market data table not yet populated. Connect the data pipeline to enable yfinance and BOC VALET historical data.")
+    _ext_stats = get_ext_market_daily_stats()
+    if _ext_stats.get("n_assets", 0) > 0:
+        _ea1, _ea2, _ea3, _ea4 = st.columns(4)
+        _ea1.metric("ASSETS LOADED", str(_ext_stats["n_assets"]))
+        _ea2.metric("TOTAL ROWS", f"{_ext_stats['n_rows']:,}")
+        _ea3.metric("DATE RANGE", f"{_ext_stats['earliest']} → {_ext_stats['latest']}")
+        _ea4.metric("LAST FETCH", _ext_stats["last_fetch"][:16] if _ext_stats.get("last_fetch") else "--")
+    else:
+        st.markdown(
+            f"<div style='color:{AMBER};font-size:0.72rem;font-family:JetBrains Mono,monospace;"
+            f"background:{PANEL};border:1px solid {BORDER};padding:0.75rem;border-radius:3px;'>"
+            f"No external market data loaded."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 
     # --- Error Log expander -----
     st.markdown("<hr>", unsafe_allow_html=True)
-    with st.expander("🔴 Error Log (last 50)", expanded=False):
+    with st.expander("ERROR LOG (LAST 50)", expanded=False):
         _error_log = st.session_state.get("_error_log", [])
 
         # Severity filter
         _sev_filter = st.selectbox(
-            "Filter by severity",
+            "FILTER BY SEVERITY",
             ["All", "ERROR", "WARNING", "INFO"],
             key="p10_error_log_severity",
             label_visibility="visible",
         )
 
         if not _error_log:
-            st.success("No errors logged this session ✅")
+            st.caption("NO ERRORS LOGGED THIS SESSION")
         else:
             # Build rows with naive severity inference from message text
             def _infer_severity(msg: str) -> str:
@@ -1396,45 +1575,30 @@ FROM ext_market_daily
                 _log_df_display = pd.DataFrame(_log_rows_filtered)
                 st.dataframe(_log_df_display, use_container_width=True, hide_index=True)
                 st.download_button(
-                    label="⬇ Download log as CSV",
+                    label="⬇ Download CSV",
                     data=_log_df_display.to_csv(index=False).encode(),
                     file_name=f"kalshi_error_log_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv",
                     key="p10_download_error_log",
                 )
             else:
-                st.info(f"No {_sev_filter} entries found in the error log.")
+                st.caption(f"No {_sev_filter} entries in the error log")
 
-        st.caption("Errors are logged here during WebSocket operation. Empty = no errors this session.")
+        st.caption("Empty = no errors this session")
 
     # --- Streamlit Cloud setup expander -----
     st.markdown("<hr>", unsafe_allow_html=True)
-    with st.expander("⚙️ STREAMLIT CLOUD SETUP — Required Secrets", expanded=False):
-        st.markdown(
-            f"""<div style='font-family:JetBrains Mono,monospace;font-size:0.75rem;
-color:{TEXT2};line-height:1.8;'>
-To enable the live arb scanner on Streamlit Cloud, set these secrets in<br>
-<strong>Settings → Secrets</strong>:<br><br>
-<span style='color:{GREEN};'>SYNTHESIS_SECRET_KEY</span> = <span style='color:{AMBER};'>"your-synthesis-api-key"</span><br>
-<span style='color:{GREEN};'>DATABASE_URL</span> = <span style='color:{AMBER};'>"postgresql://user:pass@host/dbname"</span><br><br>
-<span style='color:{TEXT3};'>Without <strong>SYNTHESIS_SECRET_KEY</strong>: the WS scanner won't start (dashboard shows
-DB data only, no live feed).</span><br><br>
-<span style='color:{TEXT3};'>Without <strong>DATABASE_URL</strong>: arbs are stored in SQLite (local, not persisted across
-restarts on Streamlit Cloud's ephemeral filesystem).</span>
-</div>""",
-            unsafe_allow_html=True,
-        )
+    with st.expander("STREAMLIT CLOUD SETUP — Required Secrets", expanded=False):
+        st.caption("SETTINGS → SECRETS: SYNTHESIS_SECRET_KEY = \"YOUR-KEY\" (REQUIRED FOR LIVE WS SCANNER) · DATABASE_URL = \"POSTGRESQL://...\" (REQUIRED FOR NEON PERSISTENCE; FALLS BACK TO EPHEMERAL SQLITE)")
 
     # --- Page-level auto-refresh (10s, live WS only) -----
     # Use timestamp throttle — never sleep() in Streamlit's main thread.
     import time as _t10
     _now10 = _t10.time()
-    if auto_refresh and ws_stats.get("connected", False):
+    if auto_refresh:
         if st.session_state.get("_p10_next_refresh", 0) <= _now10:
             st.session_state["_p10_next_refresh"] = _now10 + 10
             st.rerun()
-    elif auto_refresh:
-        st.caption("Auto-refresh paused — WebSocket offline. Refresh manually.")
 
 
 def _render_performance_panel():
@@ -1447,8 +1611,8 @@ def _render_performance_panel():
 
     benchmarks = []
     for label, fn, kwargs in [
-        ("Live arb opportunities",   get_live_arb_opportunities, {}),
-        ("Historical arb summary",   get_historical_arb_stats,   {}),
+        ("LIVE DETECTIONS (ALL STRATEGIES)",   get_live_arb_opportunities, {}),
+        ("HISTORICAL DETECTION SUMMARY",      get_historical_arb_stats,   {}),
         ("Rolling 7-day trend",      get_arb_rolling_7d,         {}),
     ]:
         t0 = time.perf_counter()
@@ -1465,13 +1629,7 @@ def _render_performance_panel():
             color = GREEN if row["_ms"] < 100 else (AMBER if row["_ms"] < 500 else RED)
             col.metric(row["QUERY"][:24], row["LATENCY"], delta=row["STATUS"] if row["STATUS"] != "OK" else None)
 
-    st.markdown(
-        f"<div style='font-size:0.6rem;color:{TEXT3};font-family:JetBrains Mono,monospace;margin-top:0.25rem;'>"
-        f"Latency measured from Streamlit process. "
-        f"(cached — connection latency includes TCP handshake + Neon cold-start; hot connections are faster). "
-        f"Cached queries return ~0ms after first call.</div>",
-        unsafe_allow_html=True,
-    )
+    st.caption("Latency from Streamlit process · includes TCP + Neon cold-start · cached queries return ~0ms")
 
 
 def _section_header(title: str):

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_event_study_hypothesis.py
 ======================================
 Tests for hypothesis-testing helpers in cross_asset/event_study.py:

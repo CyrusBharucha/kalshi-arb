@@ -1,4 +1,4 @@
-﻿"""
+"""
 arbitrage/lifecycle.py
 ======================
 Opportunity lifecycle manager for the Kalshi Arbitrage Engine.

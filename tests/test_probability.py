@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_probability.py
 Tests for probability conversion / cross-asset engine.
 """

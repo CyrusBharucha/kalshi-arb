@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_flush_candles_extended.py
 ======================================
 Extended unit tests for analysis/targeted_candle_pull._flush_candles().

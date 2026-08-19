@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/pages/p07_cross_asset.py — Cross-Asset Analysis
 
 Sections:
@@ -140,14 +140,12 @@ For each KXBOC-*/KXFED-* market in the live WS stream:
     try:
         from analysis.probability_engine import boc_rate_implied_probability
     except ImportError:
-        if rate_live:
-            st.caption("⚠ cross_asset.probability_engine not available — OIS model signals disabled. Install the cross-asset pipeline to enable live CE/OIS signals.")
         return
 
     # Current CORRA (used as OIS rate for BOC model)
     corra_pct = ext_prices.get("CORRA") or ext_prices.get("BOC_RATE")
     if not corra_pct:
-        st.caption("⚠ CORRA/BOC rate unavailable from external data feed — OIS-implied probability signals disabled. Data is fetched from the Bank of Canada Valet API; check connectivity or wait for the next ingestion cycle.")
+        st.caption("CORRA/BOC rate unavailable — OIS probability signals disabled")
         return
     # Current Fed Funds OIS approximation (use SOFR or Fed effective rate)
     # No hardcoded fallback — if unavailable we skip KXFED rows rather than use stale data
@@ -231,21 +229,10 @@ For each KXBOC-*/KXFED-* market in the live WS stream:
             "ois_used":   f"{ois_rate*100:.2f}%",
         })
 
-    with st.expander("📖 How to Read OIS Signals"):
-        st.markdown("""
-    **Positive divergence (Kalshi > OIS):** Market implies a higher cut probability than OIS swap pricing.
-    This may signal retail optimism or a pricing inefficiency — potential arb if divergence >10pp.
-
-    **Negative divergence (Kalshi < OIS):** OIS markets are more dovish than Kalshi prediction markets.
-    Institutional traders may be pricing in cuts that retail hasn't yet priced.
-
-    **Divergence >10pp:** Statistically significant — consider taking a position on the lower-priced side.
-
-    **Divergence <5pp:** Noise level — markets are in rough agreement; no actionable signal.
-    """)
+    st.caption("Positive div (Kalshi>OIS) = retail optimism · Negative div (Kalshi<OIS) = institutional dovish bias · >10pp = actionable signal · <5pp = noise")
 
     if not rows:
-        st.info("No OIS divergence signals above threshold. Market prices align with OIS-implied probabilities.")
+        st.caption("NO OIS DIVERGENCE SIGNALS ABOVE THRESHOLD")
         return
 
     # Save all rows before slider filter for fixed-threshold alerts and top divergence metric
@@ -255,24 +242,24 @@ For each KXBOC-*/KXFED-* market in the live WS stream:
     _n_above_5  = sum(1 for r in _all_rows_before_filter if abs(r["gap"]) * 100 > 5)
 
     # Top Divergence metric (always based on full unfiltered scan)
-    st.metric("Top Divergence", f"{_top_div_pp:.1f}pp", help="Maximum |Kalshi − OIS| across all scanned markets")
+    st.metric("TOP DIVERGENCE", f"{_top_div_pp:.1f}pp", help="Maximum |Kalshi − OIS| across all scanned markets")
 
     # Fixed-threshold alerts (independent of slider position)
     if _n_above_10 > 0:
-        st.error(f"🚨 High divergence detected: {_n_above_10} market(s) show >10pp Kalshi-OIS gap")
+        st.caption(f"HIGH DIVERGENCE: {_n_above_10} MARKET(S) SHOW >10PP KALSHI-OIS GAP")
     elif _n_above_5 > 0:
-        st.warning(f"⚡ Moderate divergence: {_n_above_5} market(s) show >5pp gap")
+        st.caption(f"MODERATE DIVERGENCE: {_n_above_5} MARKET(S) SHOW >5PP GAP")
 
     # --- Divergence threshold slider -----
     threshold = st.slider(
-        "Min divergence threshold (pp)", min_value=1, max_value=20, value=5, step=1,
+        "MIN DIVERGENCE THRESHOLD (PP)", min_value=1, max_value=20, value=5, step=1,
         key="p07_min_div",
     )
     rows = [r for r in rows if abs(r["gap"]) * 100 >= threshold]
-    st.caption(f"Showing signals with |Kalshi − OIS| ≥ {threshold}pp")
+    st.caption(f"SHOWING SIGNALS WITH |KALSHI − OIS| ≥ {threshold}PP")
 
     if not rows:
-        st.info(f"No signals meet the {threshold}pp divergence threshold.")
+        st.caption(f"NO SIGNALS MEET THE {threshold}PP DIVERGENCE THRESHOLD")
         return
 
     # Sort by CONF (= |gap|) descending
@@ -284,8 +271,8 @@ For each KXBOC-*/KXFED-* market in the live WS stream:
     rows_html = ""
     for r in rows:
         gap_str   = f"{r['gap']*100:+.1f}pp"
-        mid_str   = f"{r['live_mid']*100:.1f}c"
-        model_str = f"{r['model_prob']*100:.1f}c"
+        mid_str   = f"{r['live_mid']*100:.1f}¢"
+        model_str = f"{r['model_prob']*100:.1f}¢"
         conf_str  = f"{abs(r['gap'])*100:.1f}pp"
         # Confidence colour: green >= 10pp, amber >= 5pp, dim otherwise
         conf_col  = GREEN if abs(r["gap"]) >= 0.10 else (AMBER if abs(r["gap"]) >= 0.05 else TEXT3)
@@ -315,7 +302,7 @@ For each KXBOC-*/KXFED-* market in the live WS stream:
 padding:0.75rem 1rem;border-radius:3px;margin-bottom:0.75rem;'>
 <div style='font-size:0.62rem;letter-spacing:0.08em;color:{header_color};
 text-transform:uppercase;margin-bottom:8px;'>
-⚡ LIVE CROSS-ASSET SIGNALS — {len(rows)} markets · {flagged_count} flagged (|gap|≥5%)
+LIVE CROSS-ASSET SIGNALS — {len(rows)} markets · {flagged_count} flagged (|gap|≥5%)
 </div>
 <table style='width:100%;border-collapse:collapse;'>
 <thead>
@@ -365,10 +352,10 @@ def _render_ce_sum_check(rate_live: dict) -> None:
     for meeting, mids in sorted(groups.items()):
         total = sum(mids)
         dev = total - 1.0
-        flag = "CE ARB" if total < 0.98 else ("OVER" if total > 1.02 else "OK")
+        flag = "BELOW PARITY" if total < 0.98 else ("OVER" if total > 1.02 else "OK")
         rows.append({"MEETING": meeting, "OUTCOMES": len(mids),
                      "SUM OF MIDS ($)": f"{total:.3f}",
-                     "DEV FROM $1": f"{dev*100:+.1f}c", "STATUS": flag})
+                     "DEV FROM $1": f"{dev*100:+.1f}¢", "STATUS": flag})
     import pandas as _pd_ce
     _df_ce = _pd_ce.DataFrame(rows)
     _flagged = sum(1 for r in rows if r["STATUS"] != "OK")
@@ -376,13 +363,12 @@ def _render_ce_sum_check(rate_live: dict) -> None:
     st.markdown(
         f"<div style='font-size:0.62rem;letter-spacing:0.08em;color:{_col};"
         f"text-transform:uppercase;margin-bottom:4px;'>"
-        f"{'🔴 ' if _flagged else ''}CE SUM CHECK — {len(rows)} meetings · {_flagged} flagged</div>",
+        f"CE SUM CHECK — {len(rows)} meetings · {_flagged} flagged</div>",
         unsafe_allow_html=True,
     )
     st.dataframe(_df_ce, use_container_width=True, hide_index=True,
                  height=min(160, len(_df_ce) * 38 + 42))
-    st.caption("CE markets: YES mids for all rate outcomes at the same meeting should sum to ~$1. "
-               "< $0.98 = potential buy-all-YES arb. > $1.02 = book over-priced.")
+    st.caption("Sum of YES mids across rate outcomes · <98¢ = CE edge (scanner active) · >102¢ = overpriced")
 
 
 def _render_yes_no_complement_spread(live_state) -> None:
@@ -390,7 +376,7 @@ def _render_yes_no_complement_spread(live_state) -> None:
     For every live market with a valid two-sided quote, compute the implied
     YES + NO round-trip cost (yes_ask + no_ask_implied = yes_ask + 1 - yes_bid).
     Should be > 1.0 (bid-ask spread > 0). Values < 1.0 indicate a crossed/inverted
-    market — a riskless two-leg arb on the SAME contract. Displays top 20 by lowest
+    market — a feed/rounding artifact (Kalshi YES/NO always sum ≥ $1.00 live; not executable). Displays top 20 by lowest
     combined ask and flags any crossings.
     """
     try:
@@ -407,10 +393,10 @@ def _render_yes_no_complement_spread(live_state) -> None:
         combined = ask + no_ask_implied     # total cost to own both legs (should be >= 1.0)
         spread_c = round((combined - 1.0) * 100, 2)   # excess over par in cents
         crossed = combined < 1.0
-        rows.append({"TICKER": ticker, "YES ASK": f"{ask*100:.0f}c",
-                     "NO ASK (impl)": f"{no_ask_implied*100:.0f}c",
-                     "COMBINED": f"{combined*100:.1f}c",
-                     "EXCESS (c)": f"{spread_c:+.1f}",
+        rows.append({"TICKER": ticker, "YES ASK": f"{ask*100:.0f}¢",
+                     "NO ASK (impl)": f"{no_ask_implied*100:.0f}¢",
+                     "COMBINED": f"{combined*100:.1f}¢",
+                     "EXCESS (¢)": f"{spread_c:+.1f}",
                      "⚑": "CROSSED" if crossed else ""})
     if not rows:
         return
@@ -422,20 +408,13 @@ def _render_yes_no_complement_spread(live_state) -> None:
     st.markdown(
         f"<div style='font-size:0.62rem;letter-spacing:0.08em;color:{_hdr_color};"
         f"text-transform:uppercase;margin-bottom:4px;'>"
-        f"{'🔴 ' if _flagged else ''}LIVE YES/NO COMPLEMENT SPREAD — "
-        f"{len(rows)} markets · {_flagged} crossed (arb)</div>",
+        f"LIVE YES/NO COMPLEMENT SPREAD — "
+        f"{len(rows)} markets · {_flagged} below parity (feed artifact)</div>",
         unsafe_allow_html=True,
     )
     st.dataframe(_df, use_container_width=True, hide_index=True,
                  height=min(220, len(_df) * 38 + 42))
-    st.caption(
-        "Column guide — "
-        "YES ASK: cost to buy YES (cents). "
-        "NO ASK (impl): implied cost to buy NO = 1 − YES bid (cents). "
-        "COMBINED: YES ask + NO ask (impl); should be ≥ 100c since both legs together must resolve to $1. "
-        "EXCESS: combined − 100c; negative = crossed market (riskless two-leg arb on the same contract). "
-        "Sorted by lowest COMBINED (cheapest round-trip). Top 20 markets shown."
-    )
+    st.caption("COMBINED = YES ask + NO ask(impl) · EXCESS = combined − 100¢ · negative = feed artifact · sorted by cheapest round-trip · top 20")
 
 
 def render():
@@ -444,9 +423,7 @@ def render():
 CROSS-ASSET RELATIVE VALUE
 </span>
 <div style='font-size:0.7rem;color:#64748B;letter-spacing:0.04em;margin-top:0.25rem;'>
-Kalshi implied probability vs. externally derived probability.
-These are RELATIVE VALUE signals, not arbitrage &mdash; the two legs settle on
-different venues under different rules and cannot be locked against each other.
+Kalshi implied probability vs. externally derived probability &mdash; relative value signals, not executable arbs
 </div>
 """, unsafe_allow_html=True)
     st.markdown("<hr style='margin:0.5rem 0 0.75rem 0;'>", unsafe_allow_html=True)
@@ -455,6 +432,88 @@ different venues under different rules and cannot be locked against each other.
     _h = _gh()
     _is_sqlite_p07 = not _h.get("db_connected", False) and _h.get("db_mode") == "sqlite"
 
+    # --- Neon BOC/FED arb history (shown when WS scanner offline) -----
+    from dashboard.neon_utils import is_neon_connected as _is_neon_p07
+    _p07_neon_ok = _is_neon_p07()
+    try:
+        from dashboard.live_state import get_live_state as _gls_p07chk
+        _ws_p07_online = _gls_p07chk().get_stats().get("connected", False)
+    except Exception:
+        _ws_p07_online = False
+    if not _ws_p07_online and _p07_neon_ok:
+        try:
+            import dashboard.live_arb_store as _las_p07n
+            from sqlalchemy import text as _p07_text
+            _p07_eng = getattr(_las_p07n, "_pg_engine", None) or _las_p07n.get_pg_engine_cached()
+            if _p07_eng is not None:
+                with _p07_eng.connect() as _p07_c:
+                    _p07_boc_rows = _p07_c.execute(_p07_text(
+                        "SELECT ticker, strategy_type, net_edge_cents, "
+                        "yes_ask, no_ask, detected_at "
+                        "FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXFED%' OR ticker LIKE 'KXCB%' "
+                        "       OR ticker LIKE 'KXCAD%' OR ticker LIKE 'KXCORR%') "
+                        "AND strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0 "
+                        "ORDER BY detected_at DESC LIMIT 12"
+                    )).fetchall()
+                    _p07_total = _p07_c.execute(_p07_text(
+                        "SELECT COUNT(*), MAX(net_edge_cents) FROM live_arbs_cloud "
+                        "WHERE (ticker LIKE 'KXBOC%' OR ticker LIKE 'KXFED%' OR ticker LIKE 'KXCB%' "
+                        "       OR ticker LIKE 'KXCAD%' OR ticker LIKE 'KXCORR%') "
+                        "AND strategy_type NOT IN ('yes_no_complement') "
+                        "AND net_edge_cents > 0"
+                    )).fetchone()
+                if _p07_boc_rows:
+                    _p07_cnt = int(_p07_total[0]) if _p07_total else len(_p07_boc_rows)
+                    _p07_best = float(_p07_total[1] or 0) if _p07_total else 0.0
+                    st.markdown(
+                        f"<div style='margin-bottom:0.85rem;padding:0.5rem 0.85rem;"
+                        f"background:rgba(34,197,94,0.06);border:1px solid #22C55E44;"
+                        f"border-left:3px solid #22C55E;border-radius:3px;"
+                        f"font-size:0.7rem;font-family:JetBrains Mono,monospace;color:#94A3B8;line-height:1.7;'>"
+                        f"<span style='color:#22C55E;font-size:0.6rem;letter-spacing:0.1em;"
+                        f"text-transform:uppercase;'>● NEON CLOUD — BOC/FED RATE ARBS "
+                        f"({_p07_cnt} total · best {_p07_best:.2f}¢)</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    import pandas as _pd_p07n
+                    _STRAT_P07 = {
+                        "mutually_exclusive": "ME", "threshold_order": "TH",
+                        "yes_no_complement": "YNC", "collectively_exhaustive": "CE",
+                        "superset": "SS",
+                    }
+                    import time as _p07_time
+                    _now_p07 = _p07_time.time()
+                    _p07_df = _pd_p07n.DataFrame(
+                        _p07_boc_rows, columns=["TICKER", "STRATEGY", "NET EDGE (¢)", "YES ASK", "NO ASK", "AGE"]
+                    )
+                    _p07_df["STRATEGY"] = _p07_df["STRATEGY"].apply(
+                        lambda s: _STRAT_P07.get(str(s), str(s).upper()[:6])
+                    )
+                    _p07_df["NET EDGE (¢)"] = _p07_df["NET EDGE (¢)"].apply(
+                        lambda v: f"{float(v):.2f}" if v is not None else "--"
+                    )
+                    _p07_df["YES ASK"] = _p07_df["YES ASK"].apply(
+                        lambda v: f"{float(v):.3f}" if v is not None else "--"
+                    )
+                    _p07_df["NO ASK"] = _p07_df["NO ASK"].apply(
+                        lambda v: f"{float(v):.3f}" if v is not None else "--"
+                    )
+                    def _p07_age(ts):
+                        try:
+                            _s = _now_p07 - _pd_p07n.to_datetime(ts, utc=True).timestamp()
+                            if _s < 3600: return f"{int(_s//60)}m ago"
+                            if _s < 86400: return f"{int(_s//3600)}h ago"
+                            return f"{int(_s//86400)}d ago"
+                        except Exception:
+                            return str(ts)[:10] if ts else "--"
+                    _p07_df["AGE"] = _p07_df["AGE"].apply(_p07_age)
+                    st.dataframe(_p07_df, use_container_width=True, hide_index=True,
+                                 height=min(380, len(_p07_df) * 38 + 42))
+        except Exception:
+            pass
 
     # --- Latest external market prices (yfinance + BOC VALET) -----
     _ext_prices = get_latest_external_prices()
@@ -558,10 +617,10 @@ different venues under different rules and cannot be locked against each other.
                         _age_str = f"{_age_s}s"
                     _rows_ws.append({
                         "TICKER": _t,
-                        "BID": f"{_bid*100:.0f}c" if _bid else "--",
-                        "ASK": f"{_ask*100:.0f}c" if _ask else "--",
-                        "SPREAD": f"{_sprd*100:.1f}c" if _sprd else "--",
-                        "MID": f"{_mid*100:.1f}c" if _mid else "--",
+                        "BID": f"{_bid*100:.0f}¢" if _bid else "--",
+                        "ASK": f"{_ask*100:.0f}¢" if _ask else "--",
+                        "SPREAD": f"{_sprd*100:.1f}¢" if _sprd else "--",
+                        "MID": f"{_mid*100:.1f}¢" if _mid else "--",
                         "AGE": _age_str,
                     })
                 if _rows_ws:
@@ -574,13 +633,28 @@ different venues under different rules and cannot be locked against each other.
                     )
                     st.dataframe(_pd_p07ws.DataFrame(_rows_ws), use_container_width=True, hide_index=True, height=min(200, len(_rows_ws) * 38 + 42))
             else:
-                # WS connected but Synthesis has no KXBOC/KXFED/KXCB markets in the snapshot
-                st.caption(
-                    "WebSocket connected but no BOC/FED rate markets (KXBOC-*, KXFED-*, KXCB-*) "
-                    "are present in the live quote stream. Rate market tickers will appear here once "
-                    "Synthesis begins distributing them — this is normal when these markets are expired "
-                    "or not yet listed for the upcoming meeting date."
-                )
+                try:
+                    from dashboard.ws_bridge import get_feed_diagnostics as _gfd_p07
+                    _diag_p07 = _gfd_p07()
+                    _age_h_p07 = _diag_p07.get("cache_age_h")
+                    _sub_p07 = _diag_p07.get("subscribed_tickers", 0)
+                    import datetime as _dt_p07
+                    _today_p07 = _dt_p07.date.today()
+                    # FOMC Sep 17 2026 (past) → Nov 5 2026 next
+                    _fomc_sep = _dt_p07.date(2026, 9, 17)
+                    _fomc_nov = _dt_p07.date(2026, 11, 5)
+                    _near_fomc_sep = _today_p07 <= _fomc_sep + _dt_p07.timedelta(days=3)
+                    _near_fomc_nov = abs((_today_p07 - _fomc_nov).days) <= 3
+                    if _near_fomc_sep and _today_p07 <= _fomc_sep:
+                        st.caption(f"WS connected · KXFEDDECISION-26SEP near settlement ({_fomc_sep}) · books thin · {_sub_p07:,} tickers subscribed")
+                    elif _near_fomc_nov:
+                        st.caption(f"WS connected · KXFEDDECISION-26NOV near settlement ({_fomc_nov}) · books thin · {_sub_p07:,} tickers subscribed")
+                    elif _age_h_p07 and _age_h_p07 > 12:
+                        st.caption(f"WS connected · no KXBOC/KXFED rate markets in stream · Synthesis cache {_age_h_p07:.0f}h stale · {_sub_p07:,} tickers subscribed")
+                    else:
+                        st.caption(f"WS connected · no KXBOC-*/KXFED-*/KXCB-* markets in stream — expired or not yet listed · {_sub_p07:,} tickers subscribed")
+                except Exception:
+                    st.caption("WS connected · no KXBOC-*/KXFED-*/KXCB-* markets in stream — expired or not yet listed")
     except Exception:
         pass
 
@@ -614,7 +688,7 @@ different venues under different rules and cannot be locked against each other.
                 st.markdown("<hr style='margin:0.5rem 0 0.75rem 0;'>", unsafe_allow_html=True)
                 st.markdown(
                     f"<div style='font-size:0.62rem;letter-spacing:0.08em;color:{AMBER};"
-                    f"text-transform:uppercase;margin-bottom:0.5rem;'>📈 IMPLIED FED RATE PATH — NEXT {len(_fp_future)} FOMC MEETINGS</div>",
+                    f"text-transform:uppercase;margin-bottom:0.5rem;'>IMPLIED FED RATE PATH — NEXT {len(_fp_future)} FOMC MEETINGS</div>",
                     unsafe_allow_html=True,
                 )
                 _fp_cols = st.columns(len(_fp_future))
@@ -633,15 +707,12 @@ different venues under different rules and cannot be locked against each other.
                             f"{_fp_implied:.2f}%",
                             help=(
                                 f"Probability-weighted implied Fed rate in {_fp_days}d. "
-                                f"Most likely: {_fp_top[0]:.2f}% ({_fp_top[1]*100:.0f}c implied prob). "
+                                f"Most likely: {_fp_top[0]:.2f}% ({_fp_top[1]*100:.0f}¢ implied prob). "
                                 f"{len(_fp_items)} outcomes tracked."
                             ),
                         )
-                        st.caption(f"in {_fp_days}d · {len(_fp_items)} outcomes")
-                st.caption(
-                    "Implied Fed rate path derived from KXFED market mid-prices. "
-                    "Rate = probability-weighted average of all outcome strikes per meeting."
-                )
+                        st.caption(f"IN {_fp_days}D · {len(_fp_items)} OUTCOMES")
+                st.caption("Implied Fed rate path from KXFED mid-prices · rate = probability-weighted avg of outcome strikes per meeting")
 
     # --- YES/NO complement spread (single-market bid-ask inversion check) -----
     try:
@@ -696,7 +767,7 @@ different venues under different rules and cannot be locked against each other.
                         _implied_range = f">${_r['strike']:,}" if _r["strike"] else "N/A"
                         _btc_table.append({
                             "TICKER": _r["ticker"],
-                            "YES BID": f"{_r['yes_bid']*100:.0f}c",
+                            "YES BID": f"{_r['yes_bid']*100:.0f}¢",
                             "IMPLIED BTC PRICE RANGE": _implied_range,
                         })
                     st.dataframe(_pd_btc.DataFrame(_btc_table), use_container_width=True,
@@ -712,19 +783,23 @@ different venues under different rules and cannot be locked against each other.
                             help=f"YES bid = implied probability BTC > ${_lowest['strike']:,} by market expiry",
                         )
                 else:
-                    st.info("KXBTC markets found but no valid YES bids available.")
+                    st.caption("KXBTC markets found but no valid YES bids available")
 
-                st.info(
-                    "Crypto vs Rates: High BTC prices often correlate with risk-on sentiment, "
-                    "which can suppress cut probabilities in Fed funds markets."
-                )
+                st.caption("BTC positive correlation with risk-on assets")
             else:
-                st.info("No KXBTC markets currently in the live quote stream.")
+                try:
+                    from dashboard.ws_bridge import get_feed_diagnostics as _gfd_btc
+                    _diag_btc = _gfd_btc()
+                    _age_h_btc = _diag_btc.get("cache_age_h")
+                    _sub_btc = _diag_btc.get("subscribed_tickers", 0)
+                    if _age_h_btc and _age_h_btc > 12:
+                        st.caption(f"No KXBTC markets in live stream · Synthesis cache {_age_h_btc:.0f}h stale ({_sub_btc:,} tickers subscribed) — KXBTCY Jan-2027 markets may be illiquid")
+                    else:
+                        st.caption(f"No KXBTC markets in live stream · KXBTCY Jan-2027 markets currently illiquid ({_sub_btc:,} tickers subscribed)")
+                except Exception:
+                    st.caption("No KXBTC markets in live quote stream")
     except Exception:
         pass
-
-    # --- Historical signal accuracy tracking -----
-    st.info("Historical signal accuracy tracking not yet available — signals are logged for future backtesting.")
 
     # --- Live cross-asset signals (OIS model vs Kalshi mid) -----
     _render_live_ca_signals(_ext_prices or {}, _rate_live_p07)
@@ -790,11 +865,11 @@ different venues under different rules and cannot be locked against each other.
             _flagged_raw = _row.get("FLAGGED", "")
             _flagged_val = "⚑ YES" if str(_flagged_raw).lower() in ("t", "true", "1", "yes") else ""
             try:
-                _kmid_s = f"{float(_kmid_val)*100:.1f}c"
+                _kmid_s = f"{float(_kmid_val)*100:.1f}¢"
             except (ValueError, TypeError):
                 _kmid_s = str(_kmid_val)
             try:
-                _mprob_s = f"{float(_mprob_val)*100:.1f}c"
+                _mprob_s = f"{float(_mprob_val)*100:.1f}¢"
             except (ValueError, TypeError):
                 _mprob_s = str(_mprob_val)
             try:
@@ -869,23 +944,12 @@ Scanned {_scan_date}{f" — ⚠ {_age_days}d stale. Signals are for reference; m
             except Exception:
                 pass
         _corra_note = f" (live CORRA: {_fb_corra}%)" if _fb_corra else ""
-        _db_note = "Neon PostgreSQL connected" if not _is_sqlite_p07 else "local SQLite"
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {AMBER};border-left:4px solid {AMBER};
-padding:0.75rem 1rem;border-radius:3px;margin-bottom:0.75rem;'>
-<div style='font-size:0.62rem;letter-spacing:0.08em;color:{AMBER};
-text-transform:uppercase;margin-bottom:4px;'>CROSS-ASSET MODEL SIGNALS UNAVAILABLE</div>
-<div style='font-size:0.72rem;color:{TEXT2};line-height:1.6;font-family:JetBrains Mono,monospace;'>
-Cross-asset model spreads not yet populated ({_db_note}).<br>
-Connect the cross-asset pipeline to enable model spread signals.<br>
-The live signals panel above and the calculators below work without this table{_corra_note}.
-</div>
-</div>""",
-            unsafe_allow_html=True,
-        )
+        # Check Neon for a better db note
+        _p07_neon_ok = _is_neon_p07()
+        st.caption("CROSS-ASSET MODEL SPREADS UNAVAILABLE")
 
     # --- BOC Market Price History (from candlestick DB) -----
-    with st.expander("📈 BOC MARKET PRICE HISTORY (candlestick data)", expanded=True):
+    with st.expander("BOC MARKET PRICE HISTORY (CANDLESTICK)", expanded=True):
         # Get KXCB% markets from top-volume list, or query directly
         _boc_tickers = []
         try:
@@ -909,7 +973,7 @@ The live signals panel above and the calculators below work without this table{_
                 "MARKET",
                 _boc_tickers,
                 key="p07_boc_ticker",
-                help="BOC rate and Fed rate markets with candlestick data",
+                help="BOC RATE AND FED RATE MARKETS WITH CANDLESTICK DATA",
             )
             _boc_hist, _boc_err = get_market_price_history(_sel_boc, interval=60, limit=300)
             _required_cols = {"period_end_ts", "price_close", "yes_bid_close", "yes_ask_close"}
@@ -941,25 +1005,67 @@ The live signals panel above and the calculators below work without this table{_
                 if _model_line is not None:
                     fig_boc.add_hline(
                         y=_model_line, line_color=CYAN, line_dash="dash", line_width=1.5,
-                        annotation_text=f"MODEL {_model_line*100:.1f}c",
+                        annotation_text=f"MODEL {_model_line*100:.1f}¢",
                         annotation_position="right",
                     )
                 fig_boc.update_layout(**plotly_dark_layout(
-                    title={"text": f"{_sel_boc} — 1h price history (CORRA model overlay)",
+                    title={"text": f"{_sel_boc} — 1H PRICE HISTORY (CORRA MODEL OVERLAY)",
                            "font": {"size": 10, "color": TEXT3}},
-                    height=300, xaxis_title="", yaxis_title="YES Prob",
+                    height=300, xaxis_title="", yaxis_title="YES PROB",
                     yaxis=dict(range=[0, 1], tickformat=".2f"),
                     legend=dict(orientation="h", y=1.12),
                     margin={"l": 50, "r": 60, "t": 40, "b": 20},
                 ))
                 st.plotly_chart(fig_boc, use_container_width=True)
-                st.caption(f"{len(_boc_hist):,} hourly candles · {_ts.min().strftime('%Y-%m-%d') if pd.notna(_ts.min()) else '?'} – {_ts.max().strftime('%Y-%m-%d') if pd.notna(_ts.max()) else '?'}")
+                st.caption(f"{len(_boc_hist):,} HOURLY CANDLES · {_ts.min().strftime('%Y-%m-%d') if pd.notna(_ts.min()) else '?'} – {_ts.max().strftime('%Y-%m-%d') if pd.notna(_ts.max()) else '?'}")
             elif not _boc_hist.empty and not _boc_cols_ok:
-                st.caption(f"Price data for {_sel_boc} is missing expected columns. Ensure the candlestick pipeline version is up to date.")
+                st.caption(f"PRICE DATA FOR {_sel_boc} IS MISSING EXPECTED COLUMNS")
             else:
-                st.caption(f"No hourly candles found for {_sel_boc}. Ensure the candlestick pipeline has run for this market.")
+                st.caption(f"NO HOURLY CANDLES FOUND FOR {_sel_boc}")
         else:
-            st.caption("No KXCB%/KXFED% markets found in candlestick database.")
+            st.caption("NO KXCB%/KXFED% MARKETS FOUND IN CANDLESTICK DATABASE")
+            # Show BOC/FED tickers from Neon arb history as reference
+            try:
+                import dashboard.live_arb_store as _las_p07boc
+                from sqlalchemy import text as _boc_text
+                _boc_eng = getattr(_las_p07boc, "_pg_engine", None) or _las_p07boc.get_pg_engine_cached()
+                if _boc_eng is not None:
+                    with _boc_eng.connect() as _boc_c:
+                        _boc_neon = _boc_c.execute(_boc_text(
+                            "SELECT ticker, MAX(detected_at) AS last_seen, MAX(net_edge_cents) AS best_edge "
+                            "FROM live_arbs_cloud "
+                            "WHERE (ticker LIKE 'KXCB%' OR ticker LIKE 'KXFED%') "
+                            "  AND strategy_type NOT IN ('yes_no_complement') "
+                            "GROUP BY ticker ORDER BY last_seen DESC LIMIT 8"
+                        )).fetchall()
+                    if _boc_neon:
+                        import pandas as _pd_boc
+                        _boc_neon_df = _pd_boc.DataFrame(
+                            _boc_neon, columns=["ticker", "last_seen", "best_edge_c"]
+                        )
+                        def _p07_boc_age(v):
+                            if not v:
+                                return "--"
+                            try:
+                                import time as _p07_boc_t
+                                import pandas as _pd_boc_age
+                                _s = _p07_boc_t.time() - _pd_boc_age.to_datetime(v, utc=True).timestamp()
+                                if _s < 3600: return f"{int(_s // 60)}m ago"
+                                if _s < 86400: return f"{int(_s // 3600)}h ago"
+                                return f"{int(_s // 86400)}d ago"
+                            except Exception:
+                                return str(v)[:10]
+                        _boc_neon_df["last_seen"] = _boc_neon_df["last_seen"].apply(_p07_boc_age)
+                        _boc_neon_df["best_edge_c"] = _boc_neon_df["best_edge_c"].apply(lambda v: f"{float(v):.2f}¢" if v else "--")
+                        st.markdown(
+                            f"<div style='font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;"
+                            f"color:#64748b;margin:0.5rem 0 0.3rem;'>NEON — BOC/FED TICKERS WITH DETECTED ARBS</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.dataframe(_boc_neon_df, use_container_width=True, hide_index=True)
+                        st.caption("Enter a ticker above to compare against CORRA, OIS rates, or other traditional assets")
+            except Exception:
+                pass
 
     # --- Live BOC reference data -----
     render_boc_panel(show_countdown=True)
@@ -971,7 +1077,7 @@ The live signals panel above and the calculators below work without this table{_
         market_id = st.text_input(
             "KALSHI MARKET ID",
             placeholder="e.g. KXBOC-26JAN-T4.25",
-            help="Kalshi market ticker or market_id",
+            help="KALSHI MARKET TICKER OR MARKET_ID",
         )
 
     with col2:
@@ -1001,9 +1107,9 @@ The live signals panel above and the calculators below work without this table{_
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("OBSERVATIONS",  f"{len(df):,}")
-    k2.metric("AVG SPREAD",    f"{spread.mean()*100:.2f}c" if len(spread) else "--")
-    k3.metric("SPREAD STD",    f"{spread.std()*100:.2f}c"  if len(spread) else "--")
-    k4.metric("MAX |SPREAD|",  f"{spread.abs().max()*100:.2f}c" if len(spread) else "--")
+    k2.metric("AVG SPREAD",    f"{spread.mean()*100:.2f}¢" if len(spread) else "--")
+    k3.metric("SPREAD STD",    f"{spread.std()*100:.2f}¢"  if len(spread) else "--")
+    k4.metric("MAX |SPREAD|",  f"{spread.abs().max()*100:.2f}¢" if len(spread) else "--")
     _std = spread.std() if len(spread) > 1 else 0.0
     z = ((spread - spread.mean()) / _std) if _std and _std > 0 else pd.Series()
     k5.metric("CURRENT Z",     f"{float(z.iloc[-1]):.2f}" if len(z) and not pd.isna(z.iloc[-1]) else "--")
@@ -1017,21 +1123,21 @@ The live signals panel above and the calculators below work without this table{_
     if "kalshi_probability" in df.columns:
         fig.add_trace(go.Scatter(
             x=df["spread_ts"], y=df["kalshi_probability"] * 100,
-            name="Kalshi implied (c)", mode="lines",
+            name="KALSHI IMPLIED (¢)", mode="lines",
             line={"color": BLUE, "width": 1.5},
         ))
 
     if "trad_probability" in df.columns:
         fig.add_trace(go.Scatter(
             x=df["spread_ts"], y=df["trad_probability"] * 100,
-            name=f"{asset_code} OIS model (c)", mode="lines",
+            name=f"{asset_code} OIS model (¢)", mode="lines",
             line={"color": CYAN, "width": 1.5},
         ))
 
     if "spread" in df.columns:
         fig.add_trace(go.Scatter(
             x=df["spread_ts"], y=df["spread"] * 100,
-            name="Spread (Kalshi – Trad)", mode="lines",
+            name="SPREAD (KALSHI – TRAD)", mode="lines",
             line={"color": AMBER, "width": 1.2, "dash": "dot"},
             yaxis="y2",
         ))
@@ -1040,10 +1146,10 @@ The live signals panel above and the calculators below work without this table{_
         **plotly_dark_layout(
         title={"text": f"KALSHI vs {asset_code}: {market_id}", "font": {"size": 10, "color": TEXT3}},
         height=380,
-        xaxis_title="Date",
-        yaxis={"title": "Probability (c)", "tickformat": ".0f"},
+        xaxis_title="DATE",
+        yaxis={"title": "PROBABILITY (¢)", "tickformat": ".0f"},
         yaxis2={
-            "title": "Spread (c)", "overlaying": "y", "side": "right",
+            "title": "SPREAD (¢)", "overlaying": "y", "side": "right",
             "zeroline": True, "zerolinecolor": TEXT3, "zerolinewidth": 0.8,
             "gridcolor": "rgba(0,0,0,0)",
             "tickfont": {"family": "JetBrains Mono", "size": 10},
@@ -1052,11 +1158,7 @@ The live signals panel above and the calculators below work without this table{_
     ))
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        f"Kalshi implied: live Kalshi contract mid-price (cents). "
-        f"{asset_code} OIS model: probability derived from the overnight index swap (OIS) rate "
-        f"using a lognormal model — what the rates market implies for the same outcome. "
-        f"Spread = Kalshi − OIS model; persistent non-zero spread may indicate mispricing, "
-        f"information lag, or liquidity premium."
+        f"Kalshi implied vs {asset_code} OIS model · spread = Kalshi − OIS · non-zero spread = mispricing, info lag, or liquidity premium"
     )
 
     # -------------------------------------------------------------- Z-score chart --------------------------------------------------------------
@@ -1105,7 +1207,8 @@ probability_engine math functions directly.
             compute_cross_market_spread,
         )
     except ImportError:
-        st.info("Probability engine module not available. Connect the cross-asset pipeline to enable rate probability calculations.")
+        st.caption("PROBABILITY ENGINE UNAVAILABLE")
+
         return
 
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -1153,7 +1256,7 @@ probability_engine math functions directly.
     with tab_boc:
         st.markdown(
             f"<div style='font-size:0.7rem;color:{TEXT2};margin-bottom:0.75rem;'>"
-            "Estimate the implied probability of a specific BOC rate outcome using CORRA/OIS market data."
+            "Estimate the implied probability of a specific BOC rate outcome using CORRA/OIS market data"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -1161,15 +1264,15 @@ probability_engine math functions directly.
         # ---- VIX REGIME SECTION ----
         _live = _fetch_rates_vix()
         _vix_live = _live["vix"]  # Yahoo returns VIX as e.g. 18.0, not 0.18
-        st.subheader("📊 VIX REGIME")
-        st.metric("VIX (live)", f"{_vix_live:.1f}")
+        st.subheader("VIX REGIME")
+        st.metric("VIX (LIVE)", f"{_vix_live:.1f}")
         if _vix_live < 15:
-            st.success("LOW volatility regime · Kalshi options cheaply priced")
+            st.caption("LOW volatility regime · VIX < 15")
         elif _vix_live < 25:
-            st.info("MEDIUM volatility regime · Kalshi options fairly priced")
+            st.caption("MEDIUM VOLATILITY REGIME")
         else:
-            st.warning("HIGH volatility regime · Kalshi options elevated premium")
-        st.caption("VIX regime affects option pricing models and arb opportunity frequency")
+            st.caption("HIGH VOLATILITY REGIME")
+        st.caption("Source: yfinance ^VIX · cached 5 min")
         st.markdown("<br>", unsafe_allow_html=True)
         # ---- END VIX REGIME SECTION ----
 
@@ -1185,14 +1288,14 @@ probability_engine math functions directly.
         # Curve shape indicator
         _yc_diff = _yc_10y - _yc_2y
         if abs(_yc_diff) <= 0.10:
-            st.warning("Yield curve FLAT — 10Y and 2Y within 10bps")
-            _yc_shape = "Flat"
+            st.caption("Yield curve flat — 10Y and 2Y within 10bps")
+            _yc_shape = "FLAT"
         elif _yc_10y > _yc_2y:
-            st.success("Yield curve NORMAL (upward sloping) — 10Y > 2Y")
-            _yc_shape = "Normal (upward sloping)"
+            st.caption("Yield curve normal (upward sloping) — 10Y > 2Y")
+            _yc_shape = "NORMAL (UPWARD SLOPING)"
         else:
-            st.error("Yield curve INVERTED — 2Y > 10Y (recession signal)")
-            _yc_shape = "Inverted"
+            st.caption("Yield curve inverted — 2Y > 10Y")
+            _yc_shape = "INVERTED"
         _yc_c1, _yc_c2, _yc_c3 = st.columns(3)
         _yc_c1.metric("2Y TREASURY", f"{_yc_2y:.2f}%")
         _yc_c2.metric("10Y TREASURY", f"{_yc_10y:.2f}%")
@@ -1220,29 +1323,11 @@ probability_engine math functions directly.
             unsafe_allow_html=True,
         )
         # Yield curve explainer expander
-        with st.expander("📖 Yield Curve & Prediction Markets"):
-            st.markdown(f"""
-**Curve shape:** {_yc_shape}
-
-**Normal curve (10Y > 2Y):** Upward sloping yield curve signals a risk-on environment — investors
-expect future growth and inflation. In this regime Kalshi prediction markets tend to see higher
-activity in growth-sensitive categories (equities, commodities).
-
-**Inverted curve (2Y > 10Y):** A classic recession-fear signal. Historically precedes economic
-slowdowns. Kalshi recession-probability markets and Fed rate-cut markets typically see elevated
-volume and tighter bid-ask spreads during inversion.
-
-**Flat curve (within 10bps):** Transitional state — markets are uncertain about the growth
-outlook. Prediction market liquidity may be thinner as traders wait for clearer macro signals.
-
-**Impact on Kalshi arb:** A steep normal curve is associated with higher risk appetite, more
-speculative flow, and potentially wider gross edges. Inversions may reduce market activity overall
-but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
-""")
+        st.caption(f"Shape: {_yc_shape} · Normal (10Y>2Y) = risk-on · Inverted (2Y>10Y) = recession signal · Flat = transitional · steep curves correlate with wider gross edges on Kalshi rate markets")
         # Rate Differential chart: US 10Y vs CAD 10Y
         import plotly.graph_objects as _go_yc
         _fig_yc = _go_yc.Figure(_go_yc.Bar(
-            x=["US 10Y Treasury", "CAD 10Y Government Bond"],
+            x=["US 10Y TREASURY", "CAD 10Y GOVERNMENT BOND"],
             y=[_yc_10y, _yc_cad_10y],
             marker_color=[BLUE, CYAN],
             marker_line_width=0,
@@ -1253,31 +1338,25 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
             title={"text": "US 10Y vs CAD 10Y YIELD", "font": {"size": 10, "color": TEXT3}},
             height=220,
             xaxis_title="",
-            yaxis_title="Yield (%)",
+            yaxis_title="YIELD (%)",
             margin={"l": 40, "r": 20, "t": 35, "b": 40},
             yaxis={"range": [0, max(_yc_10y, _yc_cad_10y) * 1.25]},
         ))
         _fig_yc.add_hline(
             y=0, line_color=TEXT3, line_width=0.8, line_dash="dot",
-            annotation_text="No divergence (equal rates)",
+            annotation_text="NO DIVERGENCE (EQUAL RATES)",
             annotation_font_size=8, annotation_position="bottom right",
         )
         st.plotly_chart(_fig_yc, use_container_width=True)
         _yc_diff_bps = (_yc_10y - _yc_cad_10y) * 100
         st.caption(
             f"Rate differential: US 10Y − CAD 10Y = {_yc_diff_bps:+.0f}bps · "
-            f"{'US yields higher → USD carry advantage' if _yc_diff_bps > 0 else 'CAD yields higher → CAD carry advantage' if _yc_diff_bps < 0 else 'No divergence'} · live via Yahoo Finance"
+            f"{'US yields higher → USD carry advantage' if _yc_diff_bps > 0 else 'CAD yields higher → CAD carry advantage' if _yc_diff_bps < 0 else 'NO DIVERGENCE'} · live via Yahoo Finance"
         )
         st.markdown("<br>", unsafe_allow_html=True)
         # ---- END YIELD CURVE SECTION ----
 
-        with st.expander("📐 How the OIS model works", expanded=False):
-            st.markdown("""
-- **Overnight Index Swaps price future central bank rate decisions via forward rate agreements**
-- **Kalshi markets on Fed/BOC rate decisions imply a probability distribution over rate outcomes**
-- **OIS-implied probability = (forward rate - current rate) / (expected hike size)**
-- **Divergence between OIS-implied and Kalshi market price = potential mispricing signal**
-""")
+        st.caption("OIS-implied probability vs. Kalshi market price · spread = potential mispricing")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             ois_rate = st.number_input(
@@ -1288,7 +1367,7 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
         with c2:
             target_rate = st.number_input(
                 "TARGET RATE (%)", min_value=0.0, max_value=20.0, value=2.25, step=0.25,
-                help="The specific BOC rate outcome to price (current BOC rate: 2.25%; holding since Jan 28 2026; next decision Sep 9 2026)", key="boc_target",
+                help="The specific BOC rate outcome to price (current BOC rate: 2.25%; holding since Sep 9 2026; next decision Oct 28 2026)", key="boc_target",
             ) / 100.0
         with c3:
             direction = st.selectbox("DIRECTION", ["cut", "hold", "hike"], key="boc_dir")
@@ -1298,17 +1377,17 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
         try:
             p_boc = boc_rate_implied_probability(ois_rate, 30, target_rate, direction, n_meetings=n_meetings)
         except Exception as _boc_exc:
-            st.warning(f"BOC probability model error: {_boc_exc}")
+            st.caption("BOC probability model unavailable")
             p_boc = None
         if p_boc is None:
-            st.warning("OIS rate data unavailable — cannot compute BOC implied probability.")
+            st.caption("OIS rate data unavailable")
             p_boc = 0.5  # fallback so display renders; labels will show N/A
 
         # Kalshi comparison
         kalshi_c_boc = st.number_input(
-            "KALSHI CONTRACT PRICE (c)", min_value=1, max_value=99, value=50, step=1,
+            "KALSHI CONTRACT PRICE (¢)", min_value=1, max_value=99, value=50, step=1,
             key="boc_kalshi_c",
-            help="Current Kalshi YES price in cents for this rate outcome",
+            help="Current Kalshi YES price in ¢ for this rate outcome",
         )
         kalshi_p_boc = kalshi_c_boc / 100.0
 
@@ -1318,12 +1397,12 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
             spread_res = {"spread": 0.0, "log_odds_diff": None, "significant_10pct": False, "significant_5pct": False}
 
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("OIS IMPLIED", f"{p_boc*100:.1f}c")
-        k2.metric("KALSHI PRICE", f"{kalshi_c_boc}c")
+        k1.metric("OIS IMPLIED", f"{p_boc*100:.1f}¢")
+        k2.metric("KALSHI PRICE", f"{kalshi_c_boc}¢")
         spread_c = spread_res["spread"] * 100
-        k3.metric("SPREAD (K - OIS)", f"{spread_c:+.1f}c")
+        k3.metric("SPREAD (K - OIS)", f"{spread_c:+.1f}¢")
         k4.metric("LOG-ODDS DIFF", f"{spread_res['log_odds_diff']:.3f}" if spread_res["log_odds_diff"] is not None else "--")
-        sig_label = "YES (>10c)" if spread_res["significant_10pct"] else ("MINOR (>5c)" if spread_res["significant_5pct"] else "NO")
+        sig_label = "YES (>10¢)" if spread_res["significant_10pct"] else ("MINOR (>5¢)" if spread_res["significant_5pct"] else "NO")
         k5.metric("SIGNIFICANT", sig_label)
 
         # Full distribution
@@ -1345,7 +1424,7 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
         try:
             dist = boc_rate_distribution(ois_rate, possible_rates)
         except Exception as _dist_exc:
-            st.warning(f"Rate distribution error: {_dist_exc}")
+            st.caption("Rate distribution unavailable")
             dist = {}
 
         _target_key = f"{target_rate*100:.2f}%"
@@ -1359,27 +1438,15 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
                 **plotly_dark_layout(
                 title={"text": "BOC RATE IMPLIED DISTRIBUTION", "font": {"size": 10, "color": TEXT3}},
                 height=220,
-                xaxis_title="Rate", yaxis_title="Probability (%)",
+                xaxis_title="RATE", yaxis_title="PROBABILITY (%)",
                 margin={"l": 40, "r": 20, "t": 30, "b": 40},
             ))
             st.plotly_chart(fig_dist, use_container_width=True)
 
     # ------------------------------------------------------------------ FX tab
     with tab_fx:
-        st.markdown(
-            f"<div style='font-size:0.7rem;color:{TEXT2};margin-bottom:0.4rem;'>"
-            "Log-normal (Black-Scholes digital) probability that CAD/USD will be above or below a threshold."
-            "</div>"
-            f"<div style='font-size:0.62rem;color:{TEXT3};font-family:JetBrains Mono,monospace;"
-            f"margin-bottom:0.75rem;'>"
-            "Methodology: Black-Scholes digital option formula (d2 term) applied to FX rate. "
-            "Inputs: spot rate, annualized implied volatility, days to expiry. "
-            "No OIS drift applied — model assumes risk-neutral drift of zero (FX forward ≈ spot). "
-            "For short-dated contracts (&lt;90d) this is a reasonable approximation."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        with st.expander("📐 Black-Scholes Digital Option Methodology", expanded=False):
+        st.caption("BS digital (d₂) probability CAD/USD above/below threshold · inputs: spot, IV, days to expiry · zero drift assumed (FX forward ≈ spot, reasonable <90d)")
+        with st.expander("BLACK-SCHOLES DIGITAL OPTION METHODOLOGY", expanded=False):
             st.markdown(
                 "- A digital (binary) option pays $1 if the underlying ends above the strike\n"
                 "- Price = N(d2) where d2 = (ln(S/K) + (r - σ²/2)T) / (σ√T)\n"
@@ -1435,7 +1502,7 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
                 )
                 # Compare to current Kalshi YES price
                 _bs_kalshi_c = st.number_input(
-                    "Kalshi YES price (c) for comparison", min_value=1, max_value=99, value=50, step=1, key="bs_kalshi"
+                    "KALSHI YES PRICE (¢)", min_value=1, max_value=99, value=50, step=1, key="bs_kalshi"
                 )
                 _bs_kalshi_p = _bs_kalshi_c / 100.0
                 _bs_div_pp = (_bs_kalshi_p - _bs_price) * 100
@@ -1444,12 +1511,12 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
                     f"<div style='font-family:JetBrains Mono,monospace;font-size:0.78rem;color:{_bs_div_color};'>"
                     f"Kalshi YES: {_bs_kalshi_c}c &nbsp;·&nbsp; BS model: {_bs_price:.1%} &nbsp;·&nbsp; "
                     f"Divergence: <b>{_bs_div_pp:+.1f}pp</b>"
-                    f"{'  ⚡ Potential mispricing' if abs(_bs_div_pp) >= 5 else '  ✓ Within noise'}"
+                    f"{'  · mispricing' if abs(_bs_div_pp) >= 5 else '  · within noise'}"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
             except (ValueError, ZeroDivisionError) as _bs_ex:
-                st.warning(f"Cannot compute BS price: {_bs_ex}")
+                st.caption("Cannot compute BS price")
 
         f1, f2, f3, f4, f5 = st.columns(5)
         with f1:
@@ -1462,16 +1529,17 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
         with f4:
             days_fx = st.number_input("DAYS TO EXPIRY", min_value=1, max_value=365, value=30, key="fx_days")
         with f5:
-            fx_dir = st.radio("DIRECTION", ["above", "below"], key="fx_dir")
+            _fx_dir_label = st.radio("DIRECTION", ["ABOVE", "BELOW"], key="fx_dir")
+            fx_dir = _fx_dir_label.lower()
 
         try:
             p_fx = fx_implied_probability(spot, threshold, vol, days_fx, fx_dir)
         except Exception as _fx_exc:
-            st.warning(f"FX probability model error: {_fx_exc}")
+            st.caption("FX probability model unavailable")
             p_fx = 0.5
 
         kalshi_c_fx = st.number_input(
-            "KALSHI CONTRACT PRICE (c)", min_value=1, max_value=99, value=50, step=1,
+            "KALSHI CONTRACT PRICE (¢)", min_value=1, max_value=99, value=50, step=1,
             key="fx_kalshi_c",
         )
         kalshi_p_fx = kalshi_c_fx / 100.0
@@ -1481,10 +1549,10 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
             spread_res_fx = {"spread": 0.0, "log_odds_diff": None, "significant_10pct": False, "significant_5pct": False}
 
         g1, g2, g3, g4 = st.columns(4)
-        g1.metric("FX MODEL IMPLIED", f"{p_fx*100:.1f}c")
-        g2.metric("KALSHI PRICE", f"{kalshi_c_fx}c")
-        g3.metric("SPREAD (K - FX)", f"{spread_res_fx['spread']*100:+.1f}c")
-        sig_label_fx = "YES (>10c)" if spread_res_fx["significant_10pct"] else ("MINOR (>5c)" if spread_res_fx["significant_5pct"] else "NO")
+        g1.metric("FX MODEL IMPLIED", f"{p_fx*100:.1f}¢")
+        g2.metric("KALSHI PRICE", f"{kalshi_c_fx}¢")
+        g3.metric("SPREAD (K - FX)", f"{spread_res_fx['spread']*100:+.1f}¢")
+        sig_label_fx = "YES (>10¢)" if spread_res_fx["significant_10pct"] else ("MINOR (>5¢)" if spread_res_fx["significant_5pct"] else "NO")
         g4.metric("SIGNIFICANT", sig_label_fx)
 
         # Sensitivity: probability as a function of spot
@@ -1494,7 +1562,7 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
             probs_above = [fx_implied_probability(s, threshold, vol, days_fx, "above") for s in spots]
             probs_below = [fx_implied_probability(s, threshold, vol, days_fx, "below") for s in spots]
         except Exception as _sens_exc:
-            st.warning(f"FX sensitivity chart error: {_sens_exc}")
+            st.caption("FX sensitivity chart unavailable")
             probs_above = probs_below = []
 
         fig_fx = go.Figure()
@@ -1510,7 +1578,7 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
             **plotly_dark_layout(
             title={"text": "FX PROBABILITY SENSITIVITY (vs SPOT)", "font": {"size": 10, "color": TEXT3}},
             height=230,
-            xaxis_title="CAD/USD Spot", yaxis_title="Probability (%)",
+            xaxis_title="CAD/USD SPOT", yaxis_title="PROBABILITY (%)",
             margin={"l": 40, "r": 20, "t": 30, "b": 30},
         ))
         st.plotly_chart(fig_fx, use_container_width=True)
@@ -1529,8 +1597,8 @@ but increase interest in rate-decision markets (KXFED-*, KXBOC-*).
         _rd_c2.metric("FED RATE", "4.25%")
         _rd_c3.metric("DIFFERENTIAL", f"{_rate_diff:+.2f}pp")
         if _rate_diff < 0:
-            st.info("BOC rate below FED → CAD typically weakens relative to USD")
-        st.caption("Rate differential is a key driver of CAD/USD spot rate over medium-term horizons")
+            st.caption("BOC rate below FED → CAD typically weakens vs USD")
+        st.caption("RATE DIFFERENTIAL DRIVES CAD/USD OVER MEDIUM-TERM HORIZONS")
         # ---- END RATE DIFFERENTIAL MODEL ----
 
 
@@ -1549,29 +1617,24 @@ Reads from ext_market_daily table.  Silently skips if no data yet.
         with _col1:
             _sel_asset = st.selectbox(
                 "ASSET", _asset_choices, key="ext_asset_sel",
-                help="Data fetched via yfinance (FX/equity/commodity) or BOC VALET API (rates)"
+                help="DATA FETCHED VIA YFINANCE (FX/EQUITY/COMMODITY) OR BOC VALET API (RATES)"
             )
         with _col2:
             _ext_days = st.slider("DAYS", 30, 365, 180, key="ext_days_slider")
 
         _ext_df, _ext_err = get_external_market_prices([_sel_asset], days=_ext_days)
         if _ext_df.empty:
-            st.info(
-                f"No historical price data available for **{_sel_asset}** in the database yet. "
-                f"The external market data pipeline populates this table with yfinance and BOC VALET data. "
-                f"Connect the external market data pipeline to populate historical price data for this asset.",
-                icon="📊",
-            )
+            st.caption(f"No historical price data for {_sel_asset}")
             return
 
         if "obs_date" not in _ext_df.columns or "close_val" not in _ext_df.columns:
-            st.info(f"Price data for **{_sel_asset}** is missing expected columns (obs_date / close_val).")
+            st.caption(f"Price data for {_sel_asset} missing expected columns")
             return
         _ts  = pd.to_datetime(_ext_df["obs_date"])
         _val = pd.to_numeric(_ext_df["close_val"], errors="coerce")
 
         _is_rate = _sel_asset in ("CORRA", "BOC_RATE", "CAGB_2Y", "CAGB_5Y", "CAGB_10Y", "TNX", "FVX")
-        _y_label = "Rate (%)" if _is_rate else "Price"
+        _y_label = "RATE (%)" if _is_rate else "PRICE"
 
         _fig_ext = go.Figure()
         _fig_ext.add_trace(go.Scatter(
@@ -1580,7 +1643,7 @@ Reads from ext_market_daily table.  Silently skips if no data yet.
             line={"color": CYAN, "width": 1.5},
         ))
         _fig_ext.update_layout(**plotly_dark_layout(
-            title={"text": f"{_sel_asset} — {_ext_days}d history", "font": {"size": 10, "color": TEXT3}},
+            title={"text": f"{_sel_asset} — {_ext_days}D HISTORY", "font": {"size": 10, "color": TEXT3}},
             height=260,
             xaxis_title="", yaxis_title=_y_label,
             margin={"l": 50, "r": 20, "t": 35, "b": 20},
@@ -1592,68 +1655,7 @@ Reads from ext_market_daily table.  Silently skips if no data yet.
 
 
 def _info_panel():
-    st.markdown(
-        f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1.5rem;border-radius:3px;'>
-<div style='font-size:0.65rem;letter-spacing:0.08em;text-transform:uppercase;
-color:{TEXT3};margin-bottom:0.75rem;'>ABOUT THIS PAGE</div>
-<div style='font-size:0.78rem;color:{TEXT2};font-family:JetBrains Mono,monospace;line-height:1.6;'>
-Compares Kalshi contract implied probabilities against traditional market-derived
-probabilities for the same underlying event.
-<br><br>
-<b>Data sources (all free, no API keys required)</b><br>
-&middot; Bank of Canada VALET API (CORRA, policy rate, GoC bonds, CPI)<br>
-&middot; yfinance (CAD/USD, S&amp;P 500, TSX, VIX, WTI, Gold, US Treasuries)<br>
-&middot; Synthesis WebSocket (live Kalshi L2 orderbook, BBO quotes)<br>
-<br>
-<b>Interpretation</b><br>
-A persistent non-zero spread between Kalshi and traditional markets may represent
-a mispricing, information lag, liquidity premium, or jurisdiction-specific
-restriction. Spreads typically narrow as event date approaches.
-</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
-
-    # Methodology tabs
-    st.markdown("<br>", unsafe_allow_html=True)
-    t1, t2, t3 = st.tabs(["HYPOTHESIS", "DATA SOURCES", "LIMITATIONS"])
-
-    with t1:
-        st.markdown("""
-**H1:** Large Kalshi/traditional probability spreads mean-revert
-**H2:** Kalshi incorporates Canadian macro information more slowly than rates markets
-**H3:** Large spreads more likely when Kalshi liquidity is low
-**H4:** Apparent arb disappears after fees and depth constraints
-**H5:** Cross-market spreads widen around major macro releases
-""")
-    with t2:
-        st.markdown("""
-| Asset | Source | Update Frequency | API Key? |
-|-------|--------|-----------------|---------|
-| CORRA / Bank of Canada rate | BOC VALET API | Daily | None |
-| Canadian government bonds (2Y/5Y/10Y) | BOC VALET API | Daily | None |
-| Canadian CPI, unemployment | BOC VALET API | Monthly | None |
-| CAD/USD, USD/CAD FX | yfinance | Daily | None |
-| S&P 500, TSX Composite | yfinance | Daily | None |
-| VIX (volatility index) | yfinance | Daily | None |
-| WTI crude oil (front-month) | yfinance | Daily | None |
-| Gold (front-month futures) | yfinance | Daily | None |
-| US 5Y / 10Y Treasury yields | yfinance | Daily | None |
-| Kalshi BBO quotes | Synthesis WebSocket | ~30s | Synthesis key |
-
-External market data is refreshed automatically when the cross-asset pipeline is connected.
-""")
-    with t3:
-        st.markdown("""
-**Limitations:**
-- Cross-asset spreads are a *relative value* signal — the two legs settle differently
-- All data sourced from free public APIs (yfinance, BOC VALET)
-- yfinance provides daily bars only (no intraday); BOC VALET is T+1 for most series
-- The probability engine uses simplified OIS → rate models (not a full term-structure model)
-- Spread charts require the cross-asset pipeline to be connected and running
-
-Cross-asset analysis is a research component. No live trading signals are generated.
-""")
+    st.caption("Kalshi price vs. traditional market-derived probability · persistent spread may indicate mispricing or liquidity premium")
 
 
 def _no_data_panel(market_id: str, asset: str, err: str | None):
@@ -1662,35 +1664,6 @@ def _no_data_panel(market_id: str, asset: str, err: str | None):
     _is_sqlite = not _h.get("db_connected", False) and _h.get("db_mode") == "sqlite"
 
     if _is_sqlite:
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {BORDER};border-left:3px solid {AMBER};
-padding:1.25rem 1.5rem;border-radius:3px;'>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.82rem;color:{TEXT3};'>
-NO SPREAD DATA
-</div>
-<div style='font-size:0.72rem;color:{TEXT2};margin-top:0.5rem;line-height:1.7;'>
-No cross-asset spread data for <b>{market_id}</b>.<br>
-The <code>cross_asset_spreads</code> table is populated by the live probability engine
-(Synthesis WebSocket + PostgreSQL). The calculators below work without a database.
-</div>
-</div>""",
-            unsafe_allow_html=True,
-        )
+        st.caption(f"No cross-asset spread data for {market_id} · requires Neon PostgreSQL")
     else:
-        st.markdown(
-            f"""<div style='background:{PANEL};border:1px solid {BORDER};padding:1.5rem;border-radius:3px;'>
-<div style='font-family:JetBrains Mono,monospace;font-size:0.85rem;color:{TEXT3};'>
-NO CORRELATION DATA
-</div>
-<div style='font-size:0.72rem;color:{TEXT2};margin-top:0.5rem;'>
-No cross-asset data found for <b>{market_id}</b> vs <b>{asset}</b>.
-{"The cross-asset pipeline has not recorded spread data for this pair yet." if err else ""}
-</div>
-<div style='font-size:0.7rem;color:{TEXT3};margin-top:0.75rem;font-family:JetBrains Mono,monospace;'>
-Run the cross-asset pipeline to populate spread data for this market/asset pair,
-then reload the dashboard.
-</div>
-</div>""",
-            unsafe_allow_html=True,
-        )
-
+        st.caption(f"No cross-asset data for {market_id} vs {asset}" + (" · no spread data recorded" if err else ""))

@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_update_canadian_relevance.py
 ==========================================
 Unit tests for analysis/canadian_markets.update_canadian_relevance_in_db().

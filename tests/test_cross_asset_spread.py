@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_cross_asset_spread.py
 =================================
 Unit tests for compute_cross_market_spread and probability helper functions.

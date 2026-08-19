@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_event_study.py
 ==========================
 Unit tests for cross_asset/event_study.py — covers only the pure-function

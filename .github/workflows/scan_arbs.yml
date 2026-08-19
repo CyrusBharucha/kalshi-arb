@@ -1,19 +1,24 @@
 name: Scan & Record Arbs
 
-# Runs every 20 minutes, 24/7.  Connects to Synthesis WebSocket, scans for
-# arbitrage opportunities for 7 minutes, and commits any found arbs to
-# data/live_arb_log.jsonl.  Streamlit reads this file on every page load.
-# No third-party database required.
+# Two scanners run back-to-back every 5 minutes, 24/7:
+#   1. REST scanner — CE/ME/TH arbs via public Kalshi API (no auth, ~30s)
+#   2. Synthesis scanner — YES/NO complement arbs via WebSocket (7 min)
+# Results are appended to data/live_arb_log.jsonl and committed.
+# Streamlit reads this file — arb history survives reboots.
 
 on:
   schedule:
-    - cron: "*/20 * * * *"   # every 20 minutes
+    - cron: "*/5 * * * *"    # every 5 minutes
   workflow_dispatch:          # manual run from GitHub Actions UI
+
+concurrency:
+  group: arb-scan
+  cancel-in-progress: true   # don't stack runs if one is slow
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 12        # hard cap — well above the 7-min scan
+    timeout-minutes: 5         # REST scan is fast — 1-2 min total
 
     permissions:
       contents: write          # needed to git-push the JSONL file
@@ -29,18 +34,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install scanner dependencies
-        run: |
-          pip install --upgrade pip
-          pip install websocket-client requests python-dotenv
-
-      - name: Run arb scanner
-        env:
-          SYNTHESIS_SECRET_KEY: ${{ secrets.SYNTHESIS_SECRET_KEY }}
-          SCAN_DURATION: "420"     # 7 minutes
-          WARMUP_SECONDS: "60"     # 1-minute warmup
-          MIN_NET_CENTS: "10"      # only record arbs >= 10c net
-        run: python scripts/scan_and_commit.py
+      - name: Run REST arb scanner (CE/ME/TH)
+        run: python scripts/rest_scan_and_commit.py
 
       - name: Commit arb log if changed
         run: |
@@ -51,6 +46,50 @@ jobs:
             echo "No new arbs — nothing to commit."
           else
             git commit -m "chore: arb scan $(date -u +'%Y-%m-%dT%H:%M:%SZ') [skip ci]"
+            git push
+            echo "Pushed updated arb log."
+          fi
+
+  # Synthesis WebSocket scanner — deeper YES/NO complement scan, runs hourly
+  synthesis-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    if: github.event.schedule == '0 * * * *' || github.event_name == 'workflow_dispatch'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install WebSocket deps
+        run: pip install websocket-client requests python-dotenv
+
+      - name: Run Synthesis scanner (YES/NO complement)
+        env:
+          SYNTHESIS_SECRET_KEY: ${{ secrets.SYNTHESIS_SECRET_KEY }}
+          SCAN_DURATION: "420"
+          WARMUP_SECONDS: "60"
+          MIN_NET_CENTS: "10"
+        run: python scripts/scan_and_commit.py
+
+      - name: Commit arb log if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/live_arb_log.jsonl 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No new arbs — nothing to commit."
+          else
+            git commit -m "chore: synthesis scan $(date -u +'%Y-%m-%dT%H:%M:%SZ') [skip ci]"
             git push
             echo "Pushed updated arb log."
           fi

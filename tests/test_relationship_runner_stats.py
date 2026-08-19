@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_relationship_runner_stats.py
 =========================================
 Unit tests for analysis/relationship_runner.py RunStats dataclass.

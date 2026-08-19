@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_kalshi_client_helpers.py
 =====================================
 Unit tests for non-HTTP helper functions in data/kalshi_client.py:

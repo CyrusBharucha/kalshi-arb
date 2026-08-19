@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/test_me_ce_detection.py
 ================================
 Targeted unit tests for markets/relationship_detector.py:
